@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-go build -o ~/.bin/tmux-tasks .
+bash build.sh
 ```
 
 ## 配置
