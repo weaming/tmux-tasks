@@ -84,12 +84,18 @@ func (r *Runner) StartTask(task Task) error {
 
 	if task.Command != "" {
 		cmd := task.Command
+		// 设置环境变量，合并为一个 export 命令
+		if len(task.Env) > 0 {
+			var envs []string
+			for k, v := range task.Env {
+				envs = append(envs, k+"="+v)
+			}
+			cmd = "export " + strings.Join(envs, " ") + " && " + cmd
+		}
 		if task.Cwd != "" {
 			cmd = "cd " + task.Cwd + " && " + cmd
 		}
-		// 使用 eval 展开路径并执行，确保 eval 和命令之间有空格
-		evalCmd := "eval " + cmd
-		_, err = r.runCmd("tmux", "send-keys", "-t", SessionName+":"+task.Name, "'"+evalCmd+"'", "Enter")
+		_, err = r.runCmd("tmux", "send-keys", "-t", SessionName+":"+task.Name, "'"+cmd+"'", "Enter")
 		if err != nil {
 			return err
 		}
