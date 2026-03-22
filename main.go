@@ -26,8 +26,6 @@ func run(args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	InitRunner(cfg.Machine.SSH)
-
 	command := args[1]
 
 	switch command {
@@ -86,7 +84,31 @@ func listTasks(cfg *Config) error {
 	headerStatus := padVisual("状态", statusWidth)
 	fmt.Printf("\x1b[1m%s %s %s\x1b[0m\n", headerName, headerStatus, "描述")
 
-	statuses, _ := GetAllTaskStatus()
+	// Group tasks by runner SSH destination
+	runnerTasks := make(map[string][]Task)
+	for _, task := range cfg.Tasks {
+		r := NewRunnerForTask(cfg, task)
+		runnerTasks[r.SSH] = append(runnerTasks[r.SSH], task)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	statuses := make(map[string]*TaskStatus)
+
+	for sshStr, tasks := range runnerTasks {
+		wg.Add(1)
+		go func(sshDest string, groupTasks []Task) {
+			defer wg.Done()
+			r := NewRunner(sshDest)
+			sts, _ := r.GetAllTaskStatus()
+			mu.Lock()
+			for k, v := range sts {
+				statuses[k] = v
+			}
+			mu.Unlock()
+		}(sshStr, tasks)
+	}
+	wg.Wait()
 
 	for _, task := range cfg.Tasks {
 		name := task.Name
@@ -196,23 +218,24 @@ func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 		return fmt.Sprintf("任务 %s 不存在\n", name)
 	}
 
+	runner := NewRunnerForTask(cfg, task)
 	displayName := name
 	if minNameWidth > 0 {
 		displayName = padVisual(name, minNameWidth)
 	}
 
-	if HasWindow(name) {
-		status, err := GetTaskStatus(name)
+	if runner.HasWindow(name) {
+		status, err := runner.GetTaskStatus(name)
 		if err == nil && status.Running {
 			return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mRUNNING\x1b[0m", "正在运行")
 		}
-		if err := RestartTask(task); err != nil {
+		if err := runner.RestartTask(task); err != nil {
 			if strings.Contains(err.Error(), "already exists") {
-				if err := StopTask(name); err != nil {
+				if err := runner.StopTask(name); err != nil {
 					WriteLog("Task %s failed to stop: %v", name, err)
 					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "停止失败")
 				}
-				if err := StartTask(task); err != nil {
+				if err := runner.StartTask(task); err != nil {
 					WriteLog("Task %s failed to start after stop: %v", name, err)
 					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 				}
@@ -221,7 +244,7 @@ func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[33mRESTARTED\x1b[0m", "已重启")
 	}
 
-	if err := StartTask(task); err != nil {
+	if err := runner.StartTask(task); err != nil {
 		WriteLog("Task %s failed to start: %v", name, err)
 		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 	}
@@ -244,13 +267,14 @@ func stopAllTasks(cfg *Config) error {
 }
 
 func stopTask(cfg *Config, name string) error {
-	_, ok := cfg.GetTask(name)
+	task, ok := cfg.GetTask(name)
 	if !ok {
 		return fmt.Errorf("任务 %s 不存在", name)
 	}
 
+	runner := NewRunnerForTask(cfg, task)
 	fmt.Printf("停止任务: %s\n", name)
-	if err := StopTask(name); err != nil {
+	if err := runner.StopTask(name); err != nil {
 		return err
 	}
 	fmt.Printf("任务 %s 已停止\n", name)
@@ -273,7 +297,8 @@ func restartAllTasks(cfg *Config) error {
 			if desc == "" {
 				desc = "-"
 			}
-			if err := RestartTask(t); err != nil {
+			r := NewRunnerForTask(cfg, t)
+			if err := r.RestartTask(t); err != nil {
 				WriteLog("Restart failed for %s: %v", t.Name, err)
 				results[idx] = fmt.Sprintf("%s \x1b[31mFAILED\x1b[0m %s\n", padVisual(t.Name, minNameWidth), desc)
 			} else {
@@ -298,8 +323,9 @@ func restartTask(cfg *Config, name string) error {
 		return fmt.Errorf("任务 %s 不存在", name)
 	}
 
+	runner := NewRunnerForTask(cfg, task)
 	fmt.Printf("重启任务: %s\n", name)
-	if err := RestartTask(task); err != nil {
+	if err := runner.RestartTask(task); err != nil {
 		return err
 	}
 	fmt.Printf("任务 %s 已重启\n", name)
@@ -312,7 +338,8 @@ func statusTask(cfg *Config, name string) error {
 		return fmt.Errorf("任务 %s 不存在", name)
 	}
 
-	status, err := GetTaskStatus(name)
+	runner := NewRunnerForTask(cfg, task)
+	status, err := runner.GetTaskStatus(name)
 	if err != nil {
 		return err
 	}
@@ -338,16 +365,17 @@ func statusTask(cfg *Config, name string) error {
 }
 
 func logsTask(cfg *Config, name string, follow bool) error {
-	_, ok := cfg.GetTask(name)
+	task, ok := cfg.GetTask(name)
 	if !ok {
 		return fmt.Errorf("任务 %s 不存在", name)
 	}
 
+	runner := NewRunnerForTask(cfg, task)
 	if follow {
-		return FollowTaskLogs(name)
+		return runner.FollowTaskLogs(name)
 	}
 
-	logs, err := GetTaskLogs(name, 100)
+	logs, err := runner.GetTaskLogs(name, 100)
 	if err != nil {
 		return err
 	}

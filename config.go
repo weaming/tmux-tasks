@@ -13,6 +13,7 @@ type Task struct {
 	Env         map[string]string `yaml:"env"`
 	AutoStart   bool              `yaml:"autoStart"`
 	Description string            `yaml:"description"`
+	SSH         *string           `yaml:"ssh"`
 }
 
 type Machine struct {

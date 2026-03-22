@@ -237,71 +237,16 @@ func (r *Runner) FollowTaskLogs(taskName string) error {
 	return cmd.Wait()
 }
 
-var defaultRunner *Runner
-
-func InitRunner(ssh string) {
-	defaultRunner = NewRunner(ssh)
-}
-
-func HasSession() bool {
-	if defaultRunner == nil {
-		return false
+func NewRunnerForTask(cfg *Config, task Task) *Runner {
+	ssh := ""
+	if cfg.Machine != nil {
+		ssh = cfg.Machine.SSH
 	}
-	return defaultRunner.HasSession()
-}
-
-func HasWindow(taskName string) bool {
-	if defaultRunner == nil {
-		return false
+	if task.SSH != nil {
+		ssh = *task.SSH
 	}
-	return defaultRunner.HasWindow(taskName)
-}
-
-func StartTask(task Task) error {
-	if defaultRunner == nil {
-		return fmt.Errorf("not initialized")
+	if ssh == "local" || ssh == "" {
+		ssh = ""
 	}
-	return defaultRunner.StartTask(task)
-}
-
-func StopTask(taskName string) error {
-	if defaultRunner == nil {
-		return fmt.Errorf("not initialized")
-	}
-	return defaultRunner.StopTask(taskName)
-}
-
-func RestartTask(task Task) error {
-	if defaultRunner == nil {
-		return fmt.Errorf("not initialized")
-	}
-	return defaultRunner.RestartTask(task)
-}
-
-func GetTaskStatus(taskName string) (*TaskStatus, error) {
-	if defaultRunner == nil {
-		return nil, fmt.Errorf("not initialized")
-	}
-	return defaultRunner.GetTaskStatus(taskName)
-}
-
-func GetAllTaskStatus() (map[string]*TaskStatus, error) {
-	if defaultRunner == nil {
-		return nil, fmt.Errorf("not initialized")
-	}
-	return defaultRunner.GetAllTaskStatus()
-}
-
-func GetTaskLogs(taskName string, lines int) (string, error) {
-	if defaultRunner == nil {
-		return "", fmt.Errorf("not initialized")
-	}
-	return defaultRunner.GetTaskLogs(taskName, lines)
-}
-
-func FollowTaskLogs(taskName string) error {
-	if defaultRunner == nil {
-		return fmt.Errorf("not initialized")
-	}
-	return defaultRunner.FollowTaskLogs(taskName)
+	return NewRunner(ssh)
 }
