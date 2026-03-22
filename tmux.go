@@ -20,9 +20,6 @@ type Runner struct {
 }
 
 func NewRunner(ssh string) *Runner {
-	if ssh == "" {
-		return nil
-	}
 	return &Runner{SSH: ssh}
 }
 
@@ -38,9 +35,12 @@ func (r *Runner) runCmd(name string, args ...string) (string, error) {
 	} else {
 		cmd = exec.Command(name, args...)
 	}
+	WriteLog("Running: %s %s", name, strings.Join(args, " "))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", string(output), err)
+		errStr := fmt.Sprintf("%s: %v", string(output), err)
+		WriteLog("Error running command: %s", errStr)
+		return "", fmt.Errorf("%s", errStr)
 	}
 	return string(output), nil
 }
@@ -52,7 +52,8 @@ func (r *Runner) HasSession() bool {
 
 func (r *Runner) EnsureSession() error {
 	if !r.HasSession() {
-		_, err := r.runCmd("tmux", "new-session", "-d", "-s", SessionName, "sh")
+		// 使用登录 shell (-l) 以加载用户环境配置(PATH 等)
+		_, err := r.runCmd("tmux", "new-session", "-d", "-s", SessionName)
 		if err != nil {
 			return err
 		}
@@ -95,7 +96,12 @@ func (r *Runner) StartTask(task Task) error {
 		if task.Cwd != "" {
 			cmd = "cd " + task.Cwd + " && " + cmd
 		}
-		_, err = r.runCmd("tmux", "send-keys", "-t", SessionName+":"+task.Name, "'"+cmd+"'", "Enter")
+		argCmd := cmd
+		if r.isRemote() {
+			argCmd = "'" + cmd + "'"
+		}
+		WriteLog("Sending keys: %s", cmd)
+		_, err = r.runCmd("tmux", "send-keys", "-t", SessionName+":"+task.Name, argCmd, "Enter")
 		if err != nil {
 			return err
 		}

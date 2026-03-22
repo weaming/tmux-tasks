@@ -210,10 +210,12 @@ func startOneTask(cfg *Config, name string, minNameWidth int) error {
 		if err := RestartTask(task); err != nil {
 			if strings.Contains(err.Error(), "already exists") {
 				if err := StopTask(name); err != nil {
+					WriteLog("Task %s failed to stop: %v", name, err)
 					fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "停止失败")
 					return err
 				}
 				if err := StartTask(task); err != nil {
+					WriteLog("Task %s failed to start after stop: %v", name, err)
 					fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 					return err
 				}
@@ -224,6 +226,7 @@ func startOneTask(cfg *Config, name string, minNameWidth int) error {
 	}
 
 	if err := StartTask(task); err != nil {
+		WriteLog("Task %s failed to start: %v", name, err)
 		fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 		return err
 	}
