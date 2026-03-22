@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"github.com/mattn/go-runewidth"
 )
 
 func main() {
@@ -61,9 +63,9 @@ func usage() error {
 
 // 计算名称列的格式化宽度
 func calcNameWidth(cfg *Config) int {
-	minNameWidth := 4 // "名称" 视觉宽度
+	minNameWidth := runewidth.StringWidth("名称")
 	for _, task := range cfg.Tasks {
-		width := visualWidth(task.Name) + 2
+		width := runewidth.StringWidth(task.Name) + 2
 		if width > minNameWidth {
 			minNameWidth = width
 		}
@@ -71,53 +73,25 @@ func calcNameWidth(cfg *Config) int {
 	return minNameWidth
 }
 
-// 计算字符串的视觉宽度（中文算 2，英文算 1）
-func visualWidth(s string) int {
-	width := 0
-	for _, r := range s {
-		if r >= 0x4E00 && r <= 0x9FFF || // CJK Unified Ideographs
-			r >= 0x3400 && r <= 0x4DBF || // CJK Unified Ideographs Extension A
-			r >= 0xF900 && r <= 0xFAFF || // CJK Compatibility Ideographs
-			r >= 0x3000 && r <= 0x303F || // CJK Symbols and Punctuation
-			r >= 0xFF00 && r <= 0xFFEF { // Fullwidth Forms
-			width += 2
-		} else {
-			width += 1
-		}
-	}
-	return width
-}
-
 // 按视觉宽度填充字符串
 func padVisual(s string, width int) string {
-	w := visualWidth(s)
-	if w >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-w)
+	return runewidth.FillRight(s, width)
 }
 
 func listTasks(cfg *Config) error {
-	// 计算名称列最小宽度（基于最长名称 + 缓冲）
 	minNameWidth := calcNameWidth(cfg)
-	// 状态列宽度（RUNNING 是 7 字符）
 	statusWidth := 10
 
-	// 打印表头
 	headerName := padVisual("名称", minNameWidth)
 	headerStatus := padVisual("状态", statusWidth)
 	fmt.Printf("\x1b[1m%s %s %s\x1b[0m\n", headerName, headerStatus, "描述")
 
-	// 按配置顺序遍历
+	statuses, _ := GetAllTaskStatus()
+
 	for _, task := range cfg.Tasks {
 		name := task.Name
-		status, err := GetTaskStatus(name)
-		if err != nil {
-			continue
-		}
-
 		statusStr := "\x1b[31mSTOPPED\x1b[0m"
-		if status.Running {
+		if st, ok := statuses[name]; ok && st.Running {
 			statusStr = "\x1b[32mRUNNING\x1b[0m"
 		}
 
@@ -170,76 +144,87 @@ func handleLogs(cfg *Config, args []string) error {
 }
 
 func startAllTasks(cfg *Config) error {
-	// 计算名称列宽度
 	minNameWidth := calcNameWidth(cfg)
-
-	// 打印表头
 	headerName := padVisual("名称", minNameWidth)
 	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
 
-	// 按配置顺序遍历
-	for _, task := range cfg.Tasks {
-		startOneTask(cfg, task.Name, minNameWidth)
-	}
+	var wg sync.WaitGroup
+	results := make([]string, len(cfg.Tasks))
 
+	for i, task := range cfg.Tasks {
+		wg.Add(1)
+		go func(idx int, t Task) {
+			defer wg.Done()
+			results[idx] = startOneTaskMsg(cfg, t.Name, minNameWidth)
+		}(i, task)
+	}
+	wg.Wait()
+
+	for _, res := range results {
+		if res != "" {
+			fmt.Print(res)
+		}
+	}
 	fmt.Println()
 	return nil
 }
 
 func startOneTask(cfg *Config, name string, minNameWidth int) error {
+	msg := startOneTaskMsg(cfg, name, minNameWidth)
+	fmt.Print(msg)
+	return nil
+}
+
+func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 	task, ok := cfg.GetTask(name)
 	if !ok {
-		return fmt.Errorf("任务 %s 不存在", name)
+		return fmt.Sprintf("任务 %s 不存在\n", name)
 	}
 
-	// 获取显示名称
 	displayName := name
 	if minNameWidth > 0 {
 		displayName = padVisual(name, minNameWidth)
 	}
 
-	// 检查是否已存在
 	if HasWindow(name) {
-		// 检查是否正在运行
 		status, err := GetTaskStatus(name)
 		if err == nil && status.Running {
-			fmt.Printf("%s %s %s\n", displayName, "\x1b[32mRUNNING\x1b[0m", "正在运行")
-			return nil
+			return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mRUNNING\x1b[0m", "正在运行")
 		}
-		// 存在但不运行，重启
 		if err := RestartTask(task); err != nil {
 			if strings.Contains(err.Error(), "already exists") {
 				if err := StopTask(name); err != nil {
 					WriteLog("Task %s failed to stop: %v", name, err)
-					fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "停止失败")
-					return err
+					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "停止失败")
 				}
 				if err := StartTask(task); err != nil {
 					WriteLog("Task %s failed to start after stop: %v", name, err)
-					fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
-					return err
+					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 				}
 			}
 		}
-		fmt.Printf("%s %s %s\n", displayName, "\x1b[33mRESTARTED\x1b[0m", "已重启")
-		return nil
+		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[33mRESTARTED\x1b[0m", "已重启")
 	}
 
 	if err := StartTask(task); err != nil {
 		WriteLog("Task %s failed to start: %v", name, err)
-		fmt.Printf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
-		return err
+		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
 	}
-	fmt.Printf("%s %s %s\n", displayName, "\x1b[32mSTARTED\x1b[0m", "已启动")
-	return nil
+	return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mSTARTED\x1b[0m", "已启动")
 }
 
 func stopAllTasks(cfg *Config) error {
+	var wg sync.WaitGroup
 	for _, task := range cfg.Tasks {
-		if err := stopTask(cfg, task.Name); err != nil {
-			fmt.Fprintf(os.Stderr, "停止 %s 失败: %v\n", task.Name, err)
-		}
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := stopTask(cfg, name); err != nil {
+				fmt.Fprintf(os.Stderr, "停止 %s 失败: %v\n", name, err)
+			}
+		}(task.Name)
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -258,28 +243,36 @@ func stopTask(cfg *Config, name string) error {
 }
 
 func restartAllTasks(cfg *Config) error {
-	// 计算名称列宽度
 	minNameWidth := calcNameWidth(cfg)
-
-	// 打印表头
 	headerName := padVisual("名称", minNameWidth)
 	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
 
-	for _, task := range cfg.Tasks {
-		name := task.Name
-		desc := task.Description
-		if desc == "" {
-			desc = "-"
-		}
+	var wg sync.WaitGroup
+	results := make([]string, len(cfg.Tasks))
 
-		if err := RestartTask(task); err != nil {
-			fmt.Printf("%s \x1b[31mFAILED\x1b[0m %s\n", padVisual(name, minNameWidth), desc)
-			fmt.Fprintf(os.Stderr, "重启 %s 失败: %v\n", name, err)
-		} else {
-			fmt.Printf("%s \x1b[32mOK\x1b[0m %s\n", padVisual(name, minNameWidth), desc)
+	for i, task := range cfg.Tasks {
+		wg.Add(1)
+		go func(idx int, t Task) {
+			defer wg.Done()
+			desc := t.Description
+			if desc == "" {
+				desc = "-"
+			}
+			if err := RestartTask(t); err != nil {
+				WriteLog("Restart failed for %s: %v", t.Name, err)
+				results[idx] = fmt.Sprintf("%s \x1b[31mFAILED\x1b[0m %s\n", padVisual(t.Name, minNameWidth), desc)
+			} else {
+				results[idx] = fmt.Sprintf("%s \x1b[32mOK\x1b[0m %s\n", padVisual(t.Name, minNameWidth), desc)
+			}
+		}(i, task)
+	}
+	wg.Wait()
+
+	for _, res := range results {
+		if res != "" {
+			fmt.Print(res)
 		}
 	}
-
 	fmt.Println()
 	return nil
 }

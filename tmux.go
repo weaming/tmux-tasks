@@ -45,6 +45,24 @@ func (r *Runner) runCmd(name string, args ...string) (string, error) {
 	return string(output), nil
 }
 
+func (r *Runner) runScript(script string) (string, error) {
+	var cmd *exec.Cmd
+	if r.isRemote() {
+		cmd = exec.Command("ssh", "-T", r.SSH, "sh", "-s")
+	} else {
+		cmd = exec.Command("sh", "-s")
+	}
+	cmd.Stdin = strings.NewReader(script)
+	WriteLog("Running Script:\n%s", script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errStr := fmt.Sprintf("%s: %v", string(output), err)
+		WriteLog("Error running script: %s", errStr)
+		return string(output), fmt.Errorf("%s", errStr)
+	}
+	return string(output), nil
+}
+
 func (r *Runner) HasSession() bool {
 	_, err := r.runCmd("tmux", "has-session", "-t", SessionName)
 	return err == nil
@@ -62,30 +80,26 @@ func (r *Runner) EnsureSession() error {
 }
 
 func (r *Runner) HasWindow(taskName string) bool {
-	output, err := r.runCmd("tmux", "list-windows", "-t", SessionName, "-F", "'#{window_name}'")
-	if err != nil {
-		return false
-	}
-	return strings.Contains(output, taskName)
+	script := fmt.Sprintf("tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'", SessionName, taskName)
+	_, err := r.runScript(script)
+	return err == nil
 }
 
 func (r *Runner) StartTask(task Task) error {
-	if err := r.EnsureSession(); err != nil {
-		return err
-	}
-
-	if r.HasWindow(task.Name) {
-		return fmt.Errorf("window %s already exists", task.Name)
-	}
-
-	_, err := r.runCmd("tmux", "new-window", "-t", SessionName, "-n", task.Name)
-	if err != nil {
-		return err
-	}
-
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("if ! tmux has-session -t %s 2>/dev/null; then\n", SessionName))
+	sb.WriteString(fmt.Sprintf("  tmux new-session -d -s %s\n", SessionName))
+	sb.WriteString(fmt.Sprintf("fi\n"))
+	
+	sb.WriteString(fmt.Sprintf("if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, task.Name))
+	sb.WriteString(fmt.Sprintf("  echo 'window_exists'\n"))
+	sb.WriteString(fmt.Sprintf("  exit 1\n"))
+	sb.WriteString(fmt.Sprintf("fi\n"))
+	
+	sb.WriteString(fmt.Sprintf("tmux new-window -t %s -n %s\n", SessionName, task.Name))
+	
 	if task.Command != "" {
 		cmd := task.Command
-		// 设置环境变量，合并为一个 export 命令
 		if len(task.Env) > 0 {
 			var envs []string
 			for k, v := range task.Env {
@@ -96,76 +110,85 @@ func (r *Runner) StartTask(task Task) error {
 		if task.Cwd != "" {
 			cmd = "cd " + task.Cwd + " && " + cmd
 		}
-		argCmd := cmd
-		if r.isRemote() {
-			argCmd = "'" + cmd + "'"
-		}
-		WriteLog("Sending keys: %s", cmd)
-		_, err = r.runCmd("tmux", "send-keys", "-t", SessionName+":"+task.Name, argCmd, "Enter")
-		if err != nil {
-			return err
-		}
+		escapedCmd := strings.ReplaceAll(cmd, "'", "'\\''")
+		sb.WriteString(fmt.Sprintf("tmux send-keys -t %s:%s '%s' Enter\n", SessionName, task.Name, escapedCmd))
 	}
-
+	
+	output, err := r.runScript(sb.String())
+	if err != nil {
+		if strings.Contains(output, "window_exists") {
+			return fmt.Errorf("window %s already exists", task.Name)
+		}
+		return err
+	}
 	return nil
 }
 
 func (r *Runner) StopTask(taskName string) error {
-	if !r.HasWindow(taskName) {
-		return fmt.Errorf("window %s does not exist", taskName)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, taskName))
+	sb.WriteString(fmt.Sprintf("  tmux kill-window -t %s:%s\n", SessionName, taskName))
+	sb.WriteString(fmt.Sprintf("else\n"))
+	sb.WriteString(fmt.Sprintf("  echo 'window_not_exist'\n"))
+	sb.WriteString(fmt.Sprintf("  exit 1\n"))
+	sb.WriteString(fmt.Sprintf("fi\n"))
+	
+	output, err := r.runScript(sb.String())
+	if err != nil {
+		if strings.Contains(output, "window_not_exist") {
+			return fmt.Errorf("window %s does not exist", taskName)
+		}
+		return err
 	}
-
-	_, err := r.runCmd("tmux", "kill-window", "-t", SessionName+":"+taskName)
-	return err
+	return nil
 }
 
 func (r *Runner) RestartTask(task Task) error {
-	if r.HasWindow(task.Name) {
-		if err := r.StopTask(task.Name); err != nil {
-			return err
-		}
-	}
-
+	r.StopTask(task.Name) // Ignore error if it doesn't exist
 	return r.StartTask(task)
 }
 
-func (r *Runner) GetTaskStatus(taskName string) (*TaskStatus, error) {
-	status := &TaskStatus{
-		Name:    taskName,
-		Running: false,
+func (r *Runner) GetAllTaskStatus() (map[string]*TaskStatus, error) {
+	script := fmt.Sprintf("tmux list-panes -a -F '#{session_name}:#{window_index}:#{window_name}:#{pane_pid}' 2>/dev/null | grep '^%s:' || true", SessionName)
+	output, err := r.runScript(script)
+	if err != nil {
+		return nil, err
 	}
 
-	// 检查窗口是否存在
-	if !r.HasWindow(taskName) {
-		return status, nil
-	}
-
-	// 窗口存在，标记为运行中
-	status.Running = true
-
-	// 获取 pane pid
-	output, err := r.runCmd("tmux", "list-panes", "-t", SessionName+":"+taskName, "-F", "#{pane_pid}")
-	if err == nil {
-		pids := strings.TrimSpace(output)
-		if pids != "" {
-			fmt.Sscanf(pids, "%d", &status.PID)
+	statuses := make(map[string]*TaskStatus)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
 		}
-	}
-
-	// 获取窗口索引
-	output, err = r.runCmd("tmux", "list-windows", "-t", SessionName, "-F", "'#{window_index}:#{window_name}'")
-	if err == nil {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			parts := strings.Split(line, ":")
-			if len(parts) >= 2 && parts[1] == taskName {
-				fmt.Sscanf(parts[0], "%d", &status.WindowID)
-				break
+		parts := strings.Split(line, ":")
+		if len(parts) >= 4 {
+			// parts[0] = session_name
+			// parts[1] = window_index
+			// parts[2] = window_name
+			// parts[3] = pane_pid
+			name := parts[2]
+			status := &TaskStatus{
+				Name:    name,
+				Running: true,
 			}
+			fmt.Sscanf(parts[1], "%d", &status.WindowID)
+			fmt.Sscanf(parts[3], "%d", &status.PID)
+			statuses[name] = status
 		}
 	}
+	return statuses, nil
+}
 
-	return status, nil
+func (r *Runner) GetTaskStatus(taskName string) (*TaskStatus, error) {
+	statuses, err := r.GetAllTaskStatus()
+	if err != nil {
+		return nil, err
+	}
+	if st, ok := statuses[taskName]; ok {
+		return st, nil
+	}
+	return &TaskStatus{Name: taskName, Running: false}, nil
 }
 
 func (r *Runner) GetTaskLogs(taskName string, lines int) (string, error) {
@@ -222,6 +245,13 @@ func GetTaskStatus(taskName string) (*TaskStatus, error) {
 		return nil, fmt.Errorf("not initialized")
 	}
 	return defaultRunner.GetTaskStatus(taskName)
+}
+
+func GetAllTaskStatus() (map[string]*TaskStatus, error) {
+	if defaultRunner == nil {
+		return nil, fmt.Errorf("not initialized")
+	}
+	return defaultRunner.GetAllTaskStatus()
 }
 
 func GetTaskLogs(taskName string, lines int) (string, error) {
