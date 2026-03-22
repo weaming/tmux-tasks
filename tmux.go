@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"time"
 )
 
 const SessionName = "tmux-tasks"
@@ -28,12 +32,15 @@ func (r *Runner) isRemote() bool {
 }
 
 func (r *Runner) runCmd(name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	if r.isRemote() {
 		remoteCmd := name + " " + strings.Join(args, " ")
-		cmd = exec.Command("ssh", "-T", r.SSH, remoteCmd)
+		cmd = exec.CommandContext(ctx, "ssh", "-T", r.SSH, remoteCmd)
 	} else {
-		cmd = exec.Command(name, args...)
+		cmd = exec.CommandContext(ctx, name, args...)
 	}
 	WriteLog("Running: %s %s", name, strings.Join(args, " "))
 	output, err := cmd.CombinedOutput()
@@ -46,11 +53,14 @@ func (r *Runner) runCmd(name string, args ...string) (string, error) {
 }
 
 func (r *Runner) runScript(script string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	if r.isRemote() {
-		cmd = exec.Command("ssh", "-T", r.SSH, "sh", "-s")
+		cmd = exec.CommandContext(ctx, "ssh", "-T", r.SSH, "sh", "-s")
 	} else {
-		cmd = exec.Command("sh", "-s")
+		cmd = exec.CommandContext(ctx, "sh", "-s")
 	}
 	cmd.Stdin = strings.NewReader(script)
 	WriteLog("Running Script:\n%s", script)
@@ -196,7 +206,35 @@ func (r *Runner) GetTaskLogs(taskName string, lines int) (string, error) {
 		return "", fmt.Errorf("window %s does not exist", taskName)
 	}
 
-	return r.runCmd("tmux", "capture-pane", "-t", SessionName+":"+taskName, "-p", "-S", fmt.Sprintf("-%d", lines))
+	return r.runCmd("tmux", "capture-pane", "-e", "-t", SessionName+":"+taskName, "-p", "-S", fmt.Sprintf("-%d", lines))
+}
+
+func (r *Runner) FollowTaskLogs(taskName string) error {
+	var cmd *exec.Cmd
+	if r.isRemote() {
+		cmd = exec.Command("ssh", "-t", r.SSH, "tmux", "attach-session", "-t", SessionName+":"+taskName, "-r")
+	} else {
+		cmd = exec.Command("tmux", "attach-session", "-t", SessionName+":"+taskName, "-r")
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		os.Exit(0)
+	}()
+
+	return cmd.Wait()
 }
 
 var defaultRunner *Runner
@@ -259,4 +297,11 @@ func GetTaskLogs(taskName string, lines int) (string, error) {
 		return "", fmt.Errorf("not initialized")
 	}
 	return defaultRunner.GetTaskLogs(taskName, lines)
+}
+
+func FollowTaskLogs(taskName string) error {
+	if defaultRunner == nil {
+		return fmt.Errorf("not initialized")
+	}
+	return defaultRunner.FollowTaskLogs(taskName)
 }

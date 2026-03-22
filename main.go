@@ -57,7 +57,7 @@ func usage() error {
 	fmt.Println("  stop [name]         停止任务（无参数则停止所有）")
 	fmt.Println("  restart [name]      重启任务（无参数则重启所有）")
 	fmt.Println("  status [name]       查看任务状态")
-	fmt.Println("  logs [name]         查看任务日志")
+	fmt.Println("  logs [-f] [name]    查看或跟踪任务日志（-f 实时跟随）")
 	return nil
 }
 
@@ -140,7 +140,22 @@ func handleLogs(cfg *Config, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("请指定任务名称")
 	}
-	return logsTask(cfg, args[0])
+
+	follow := false
+	var taskName string
+	for _, arg := range args {
+		if arg == "-f" || arg == "--follow" {
+			follow = true
+		} else {
+			taskName = arg
+		}
+	}
+
+	if taskName == "" {
+		return fmt.Errorf("请指定任务名称")
+	}
+
+	return logsTask(cfg, taskName, follow)
 }
 
 func startAllTasks(cfg *Config) error {
@@ -322,10 +337,14 @@ func statusTask(cfg *Config, name string) error {
 	return nil
 }
 
-func logsTask(cfg *Config, name string) error {
+func logsTask(cfg *Config, name string, follow bool) error {
 	_, ok := cfg.GetTask(name)
 	if !ok {
 		return fmt.Errorf("任务 %s 不存在", name)
+	}
+
+	if follow {
+		return FollowTaskLogs(name)
 	}
 
 	logs, err := GetTaskLogs(name, 100)
@@ -333,6 +352,19 @@ func logsTask(cfg *Config, name string) error {
 		return err
 	}
 
-	fmt.Print(strings.TrimSpace(logs))
+	lines := strings.Split(strings.ReplaceAll(logs, "\r\n", "\n"), "\n")
+	for len(lines) > 0 {
+		clean := strings.ReplaceAll(lines[len(lines)-1], "\x1b[0m", "")
+		clean = strings.ReplaceAll(clean, "\x1b[K", "")
+		clean = strings.ReplaceAll(clean, "\x1b[m", "")
+		clean = strings.TrimSpace(clean)
+		if clean == "" {
+			lines = lines[:len(lines)-1]
+		} else {
+			break
+		}
+	}
+
+	fmt.Println(strings.Join(lines, "\n"))
 	return nil
 }
