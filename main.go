@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+
 	"github.com/mattn/go-runewidth"
 )
 
@@ -47,15 +48,15 @@ func run(args []string) error {
 }
 
 func usage() error {
-	fmt.Println("Usage: tmux-tasks <command> [task name]")
+	fmt.Println("Usage: tmux-tasks <command> [task names...]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  list                列出所有任务状态")
-	fmt.Println("  start [name]        启动任务（无参数则启动所有）")
-	fmt.Println("  stop [name]         停止任务（无参数则停止所有）")
-	fmt.Println("  restart [name]      重启任务（无参数则重启所有）")
-	fmt.Println("  status [name]       查看任务状态")
-	fmt.Println("  logs [-f] [name]    查看或跟踪任务日志（-f 实时跟随）")
+	fmt.Println("  start [names...]    启动任务（无参数则启动所有，支持通配符）")
+	fmt.Println("  stop [names...]     停止任务（无参数则停止所有，支持通配符）")
+	fmt.Println("  restart [names...]  重启任务（无参数则重启所有，支持通配符）")
+	fmt.Println("  status [names...]   查看任务状态（无参数则显示列表，支持通配符）")
+	fmt.Println("  logs [-f] [names..] 查看或跟踪任务日志（-f 实时跟随）")
 	return nil
 }
 
@@ -74,6 +75,41 @@ func calcNameWidth(cfg *Config) int {
 // 按视觉宽度填充字符串
 func padVisual(s string, width int) string {
 	return runewidth.FillRight(s, width)
+}
+
+// 匹配任务名，支持通配符 *
+func matchTaskNames(cfg *Config, patterns []string) []Task {
+	if len(patterns) == 0 {
+		return cfg.Tasks
+	}
+
+	var matched []Task
+	for _, task := range cfg.Tasks {
+		for _, pattern := range patterns {
+			if matchTaskName(task.Name, pattern) {
+				matched = append(matched, task)
+				break
+			}
+		}
+	}
+	return matched
+}
+
+// 单个任务名是否匹配模式（支持 * 通配符）
+func matchTaskName(name, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.Contains(pattern, "*") {
+		parts := strings.Split(pattern, "*")
+		if len(parts) == 2 {
+			return strings.HasPrefix(name, parts[0]) && strings.HasSuffix(name, parts[1])
+		}
+		if len(parts) == 1 {
+			return strings.HasPrefix(name, parts[0]) || strings.HasSuffix(name, parts[0])
+		}
+	}
+	return name == pattern
 }
 
 func listTasks(cfg *Config) error {
@@ -130,32 +166,47 @@ func listTasks(cfg *Config) error {
 }
 
 func handleStart(cfg *Config, args []string) error {
-	if len(args) == 0 {
+	matchedTasks := matchTaskNames(cfg, args)
+	if len(matchedTasks) == 0 {
+		if len(args) > 0 {
+			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+		}
 		return startAllTasks(cfg)
 	}
-	// 单个任务时使用默认宽度
-	return startOneTask(cfg, args[0], 0)
+	return startTasks(cfg, matchedTasks)
 }
 
 func handleStop(cfg *Config, args []string) error {
-	if len(args) == 0 {
+	matchedTasks := matchTaskNames(cfg, args)
+	if len(matchedTasks) == 0 {
+		if len(args) > 0 {
+			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+		}
 		return stopAllTasks(cfg)
 	}
-	return stopTask(cfg, args[0])
+	return stopTasks(cfg, matchedTasks)
 }
 
 func handleRestart(cfg *Config, args []string) error {
-	if len(args) == 0 {
+	matchedTasks := matchTaskNames(cfg, args)
+	if len(matchedTasks) == 0 {
+		if len(args) > 0 {
+			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+		}
 		return restartAllTasks(cfg)
 	}
-	return restartTask(cfg, args[0])
+	return restartTasks(cfg, matchedTasks)
 }
 
 func handleStatus(cfg *Config, args []string) error {
-	if len(args) == 0 {
+	matchedTasks := matchTaskNames(cfg, args)
+	if len(matchedTasks) == 0 {
+		if len(args) > 0 {
+			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+		}
 		return listTasks(cfg)
 	}
-	return statusTask(cfg, args[0])
+	return statusTasks(cfg, matchedTasks)
 }
 
 func handleLogs(cfg *Config, args []string) error {
@@ -164,31 +215,36 @@ func handleLogs(cfg *Config, args []string) error {
 	}
 
 	follow := false
-	var taskName string
+	var taskNames []string
 	for _, arg := range args {
 		if arg == "-f" || arg == "--follow" {
 			follow = true
 		} else {
-			taskName = arg
+			taskNames = append(taskNames, arg)
 		}
 	}
 
-	if taskName == "" {
+	if len(taskNames) == 0 {
 		return fmt.Errorf("请指定任务名称")
 	}
 
-	return logsTask(cfg, taskName, follow)
+	matchedTasks := matchTaskNames(cfg, taskNames)
+	if len(matchedTasks) == 0 {
+		return fmt.Errorf("没有匹配的任务: %s", strings.Join(taskNames, ", "))
+	}
+
+	return logsTasks(cfg, matchedTasks, follow)
 }
 
-func startAllTasks(cfg *Config) error {
+func startTasks(cfg *Config, tasks []Task) error {
 	minNameWidth := calcNameWidth(cfg)
 	headerName := padVisual("名称", minNameWidth)
 	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
 
 	var wg sync.WaitGroup
-	results := make([]string, len(cfg.Tasks))
+	results := make([]string, len(tasks))
 
-	for i, task := range cfg.Tasks {
+	for i, task := range tasks {
 		wg.Add(1)
 		go func(idx int, t Task) {
 			defer wg.Done()
@@ -204,6 +260,10 @@ func startAllTasks(cfg *Config) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+func startAllTasks(cfg *Config) error {
+	return startTasks(cfg, cfg.Tasks)
 }
 
 func startOneTask(cfg *Config, name string, minNameWidth int) error {
@@ -251,22 +311,26 @@ func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 	return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mSTARTED\x1b[0m", "已启动")
 }
 
-func stopAllTasks(cfg *Config) error {
+func stopTasks(cfg *Config, tasks []Task) error {
 	var wg sync.WaitGroup
-	for _, task := range cfg.Tasks {
+	for _, task := range tasks {
 		wg.Add(1)
-		go func(name string) {
+		go func(t Task) {
 			defer wg.Done()
-			if err := stopTask(cfg, name); err != nil {
-				fmt.Fprintf(os.Stderr, "停止 %s 失败: %v\n", name, err)
+			if err := stopOneTask(cfg, t.Name); err != nil {
+				fmt.Fprintf(os.Stderr, "停止 %s 失败: %v\n", t.Name, err)
 			}
-		}(task.Name)
+		}(task)
 	}
 	wg.Wait()
 	return nil
 }
 
-func stopTask(cfg *Config, name string) error {
+func stopAllTasks(cfg *Config) error {
+	return stopTasks(cfg, cfg.Tasks)
+}
+
+func stopOneTask(cfg *Config, name string) error {
 	task, ok := cfg.GetTask(name)
 	if !ok {
 		return fmt.Errorf("任务 %s 不存在", name)
@@ -281,15 +345,19 @@ func stopTask(cfg *Config, name string) error {
 	return nil
 }
 
-func restartAllTasks(cfg *Config) error {
+func stopTask(cfg *Config, name string) error {
+	return stopOneTask(cfg, name)
+}
+
+func restartTasks(cfg *Config, tasks []Task) error {
 	minNameWidth := calcNameWidth(cfg)
 	headerName := padVisual("名称", minNameWidth)
 	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
 
 	var wg sync.WaitGroup
-	results := make([]string, len(cfg.Tasks))
+	results := make([]string, len(tasks))
 
-	for i, task := range cfg.Tasks {
+	for i, task := range tasks {
 		wg.Add(1)
 		go func(idx int, t Task) {
 			defer wg.Done()
@@ -317,6 +385,10 @@ func restartAllTasks(cfg *Config) error {
 	return nil
 }
 
+func restartAllTasks(cfg *Config) error {
+	return restartTasks(cfg, cfg.Tasks)
+}
+
 func restartTask(cfg *Config, name string) error {
 	task, ok := cfg.GetTask(name)
 	if !ok {
@@ -332,7 +404,21 @@ func restartTask(cfg *Config, name string) error {
 	return nil
 }
 
+func statusTasks(cfg *Config, tasks []Task) error {
+	for _, task := range tasks {
+		if err := statusOneTask(cfg, task.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "查看 %s 状态失败: %v\n", task.Name, err)
+		}
+		fmt.Println()
+	}
+	return nil
+}
+
 func statusTask(cfg *Config, name string) error {
+	return statusOneTask(cfg, name)
+}
+
+func statusOneTask(cfg *Config, name string) error {
 	task, ok := cfg.GetTask(name)
 	if !ok {
 		return fmt.Errorf("任务 %s 不存在", name)
@@ -362,6 +448,38 @@ func statusTask(cfg *Config, name string) error {
 	fmt.Printf("状态: %s\n", running)
 
 	return nil
+}
+
+func logsTasks(cfg *Config, tasks []Task, follow bool) error {
+	if follow {
+		return logsTasksFollow(cfg, tasks)
+	}
+	return logsTasksNoFollow(cfg, tasks)
+}
+
+func logsTasksNoFollow(cfg *Config, tasks []Task) error {
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(t Task) {
+			defer wg.Done()
+			logs, err := getTaskLogs(cfg, t.Name, 100)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "获取 %s 日志失败: %v\n", t.Name, err)
+				return
+			}
+			fmt.Printf("=== %s ===\n%s\n", t.Name, logs)
+		}(task)
+	}
+	wg.Wait()
+	return nil
+}
+
+func logsTasksFollow(cfg *Config, tasks []Task) error {
+	if len(tasks) > 1 {
+		return fmt.Errorf("-f 模式只能跟随单个任务，当前匹配到 %d 个任务", len(tasks))
+	}
+	return followTaskLogs(cfg, tasks[0].Name)
 }
 
 func logsTask(cfg *Config, name string, follow bool) error {
@@ -395,4 +513,42 @@ func logsTask(cfg *Config, name string, follow bool) error {
 
 	fmt.Println(strings.Join(lines, "\n"))
 	return nil
+}
+
+func getTaskLogs(cfg *Config, name string, lines int) (string, error) {
+	task, ok := cfg.GetTask(name)
+	if !ok {
+		return "", fmt.Errorf("任务 %s 不存在", name)
+	}
+
+	runner := NewRunnerForTask(cfg, task)
+	logs, err := runner.GetTaskLogs(name, lines)
+	if err != nil {
+		return "", err
+	}
+
+	linesStr := strings.Split(strings.ReplaceAll(logs, "\r\n", "\n"), "\n")
+	for len(linesStr) > 0 {
+		clean := strings.ReplaceAll(linesStr[len(linesStr)-1], "\x1b[0m", "")
+		clean = strings.ReplaceAll(clean, "\x1b[K", "")
+		clean = strings.ReplaceAll(clean, "\x1b[m", "")
+		clean = strings.TrimSpace(clean)
+		if clean == "" {
+			linesStr = linesStr[:len(linesStr)-1]
+		} else {
+			break
+		}
+	}
+
+	return strings.Join(linesStr, "\n"), nil
+}
+
+func followTaskLogs(cfg *Config, name string) error {
+	task, ok := cfg.GetTask(name)
+	if !ok {
+		return fmt.Errorf("任务 %s 不存在", name)
+	}
+
+	runner := NewRunnerForTask(cfg, task)
+	return runner.FollowTaskLogs(name)
 }
