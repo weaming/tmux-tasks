@@ -23,8 +23,8 @@ tasks:
 
   v2ray-profiles:
     command: markdir -no-index '/'
-    cwd: ~/src/v2rayProfiles/users
-    description: v2ray 配置管理
+    cwd: ~/my-docs
+    description: 文档管理
 ```
 
 ## 使用
