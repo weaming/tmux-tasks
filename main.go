@@ -77,6 +77,12 @@ func padVisual(s string, width int) string {
 	return runewidth.FillRight(s, width)
 }
 
+// 将状态文本按视觉宽度对齐后包裹 ANSI 颜色
+func colorPaddedStatus(text, ansiColor string, width int) string {
+	padded := runewidth.FillRight(text, width)
+	return ansiColor + padded + "\x1b[0m"
+}
+
 // 匹配任务名，支持通配符 *
 // excludeDisabled 为 true 时，patterns 为空会过滤掉 disabled 的任务
 func matchTaskNames(cfg *Config, patterns []string, excludeDisabled bool) []Task {
@@ -126,9 +132,11 @@ func listTasks(cfg *Config) error {
 	minNameWidth := calcNameWidth(cfg)
 	statusWidth := 10
 
+	disabledWidth := runewidth.StringWidth("启用")
 	headerName := padVisual("名称", minNameWidth)
 	headerStatus := padVisual("状态", statusWidth)
-	fmt.Printf("\x1b[1m%s %s %s 描述\x1b[0m\n", headerName, headerStatus, "已禁用")
+	headerDisabled := padVisual("启用", disabledWidth)
+	fmt.Printf("\x1b[1m%s %s %s 描述\x1b[0m\n", headerName, headerStatus, headerDisabled)
 
 	// Group tasks by runner SSH destination
 	runnerTasks := make(map[string][]Task)
@@ -158,9 +166,9 @@ func listTasks(cfg *Config) error {
 
 	for _, task := range cfg.Tasks {
 		name := task.Name
-		statusStr := "\x1b[31mSTOPPED\x1b[0m"
+		statusStr := colorPaddedStatus("STOPPED", "\x1b[31m", statusWidth)
 		if st, ok := statuses[name]; ok && st.Running {
-			statusStr = "\x1b[32mRUNNING\x1b[0m"
+			statusStr = colorPaddedStatus("RUNNING", "\x1b[32m", statusWidth)
 		}
 
 		desc := task.Description
@@ -168,9 +176,12 @@ func listTasks(cfg *Config) error {
 			desc = "-"
 		}
 
-		disabledStr := fmt.Sprintf("%v", task.Disabled)
+		disabledStr := padVisual("✅", disabledWidth)
+		if task.Disabled {
+			disabledStr = padVisual("❌", disabledWidth)
+		}
 
-		fmt.Printf("%s %s %s %s\n", padVisual(name, minNameWidth), padVisual(statusStr, statusWidth), disabledStr, desc)
+		fmt.Printf("%s %s %s %s\n", padVisual(name, minNameWidth), statusStr, disabledStr, desc)
 	}
 
 	fmt.Println()
@@ -250,8 +261,10 @@ func handleLogs(cfg *Config, args []string) error {
 
 func startTasks(cfg *Config, tasks []Task) error {
 	minNameWidth := calcNameWidth(cfg)
+	statusWidth := 10
 	headerName := padVisual("名称", minNameWidth)
-	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
+	headerStatus := padVisual("状态", statusWidth)
+	fmt.Printf("\x1b[1m%s %s %s\x1b[0m\n", headerName, headerStatus, "描述")
 
 	var wg sync.WaitGroup
 	results := make([]string, len(tasks))
@@ -296,31 +309,32 @@ func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 		displayName = padVisual(name, minNameWidth)
 	}
 
+	statusWidth := 10
 	if runner.HasWindow(name) {
 		status, err := runner.GetTaskStatus(name)
 		if err == nil && status.Running {
-			return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mRUNNING\x1b[0m", "正在运行")
+			return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("RUNNING", "\x1b[32m", statusWidth), "正在运行")
 		}
 		if err := runner.RestartTask(task); err != nil {
 			if strings.Contains(err.Error(), "already exists") {
 				if err := runner.StopTask(name); err != nil {
 					WriteLog("Task %s failed to stop: %v", name, err)
-					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "停止失败")
+					return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("FAILED", "\x1b[31m", statusWidth), "停止失败")
 				}
 				if err := runner.StartTask(task); err != nil {
 					WriteLog("Task %s failed to start after stop: %v", name, err)
-					return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
+					return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("FAILED", "\x1b[31m", statusWidth), "启动失败")
 				}
 			}
 		}
-		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[33mRESTARTED\x1b[0m", "已重启")
+		return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("RESTARTED", "\x1b[33m", statusWidth), "已重启")
 	}
 
 	if err := runner.StartTask(task); err != nil {
 		WriteLog("Task %s failed to start: %v", name, err)
-		return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[31mFAILED\x1b[0m", "启动失败")
+		return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("FAILED", "\x1b[31m", statusWidth), "启动失败")
 	}
-	return fmt.Sprintf("%s %s %s\n", displayName, "\x1b[32mSTARTED\x1b[0m", "已启动")
+	return fmt.Sprintf("%s %s %s\n", displayName, colorPaddedStatus("STARTED", "\x1b[32m", statusWidth), "已启动")
 }
 
 func stopTasks(cfg *Config, tasks []Task) error {
@@ -363,8 +377,10 @@ func stopTask(cfg *Config, name string) error {
 
 func restartTasks(cfg *Config, tasks []Task) error {
 	minNameWidth := calcNameWidth(cfg)
+	statusWidth := 10
 	headerName := padVisual("名称", minNameWidth)
-	fmt.Printf("\x1b[1m%s %-10s %s\x1b[0m\n", headerName, "状态", "描述")
+	headerStatus := padVisual("状态", statusWidth)
+	fmt.Printf("\x1b[1m%s %s %s\x1b[0m\n", headerName, headerStatus, "描述")
 
 	var wg sync.WaitGroup
 	results := make([]string, len(tasks))
@@ -380,9 +396,9 @@ func restartTasks(cfg *Config, tasks []Task) error {
 			r := NewRunnerForTask(cfg, t)
 			if err := r.RestartTask(t); err != nil {
 				WriteLog("Restart failed for %s: %v", t.Name, err)
-				results[idx] = fmt.Sprintf("%s \x1b[31mFAILED\x1b[0m %s\n", padVisual(t.Name, minNameWidth), desc)
+				results[idx] = fmt.Sprintf("%s %s %s\n", padVisual(t.Name, minNameWidth), colorPaddedStatus("FAILED", "\x1b[31m", statusWidth), desc)
 			} else {
-				results[idx] = fmt.Sprintf("%s \x1b[32mOK\x1b[0m %s\n", padVisual(t.Name, minNameWidth), desc)
+				results[idx] = fmt.Sprintf("%s %s %s\n", padVisual(t.Name, minNameWidth), colorPaddedStatus("OK", "\x1b[32m", statusWidth), desc)
 			}
 		}(i, task)
 	}
