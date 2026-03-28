@@ -14,6 +14,7 @@ type Task struct {
 	AutoStart   bool              `yaml:"autoStart"`
 	Description string            `yaml:"description"`
 	SSH         *string           `yaml:"ssh"`
+	Disabled    bool              `yaml:"disabled"`
 }
 
 type Machine struct {

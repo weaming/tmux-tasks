@@ -78,8 +78,18 @@ func padVisual(s string, width int) string {
 }
 
 // 匹配任务名，支持通配符 *
-func matchTaskNames(cfg *Config, patterns []string) []Task {
+// excludeDisabled 为 true 时，patterns 为空会过滤掉 disabled 的任务
+func matchTaskNames(cfg *Config, patterns []string, excludeDisabled bool) []Task {
 	if len(patterns) == 0 {
+		if excludeDisabled {
+			var enabled []Task
+			for _, task := range cfg.Tasks {
+				if !task.Disabled {
+					enabled = append(enabled, task)
+				}
+			}
+			return enabled
+		}
 		return cfg.Tasks
 	}
 
@@ -118,7 +128,7 @@ func listTasks(cfg *Config) error {
 
 	headerName := padVisual("名称", minNameWidth)
 	headerStatus := padVisual("状态", statusWidth)
-	fmt.Printf("\x1b[1m%s %s %s\x1b[0m\n", headerName, headerStatus, "描述")
+	fmt.Printf("\x1b[1m%s %s %s 描述\x1b[0m\n", headerName, headerStatus, "已禁用")
 
 	// Group tasks by runner SSH destination
 	runnerTasks := make(map[string][]Task)
@@ -158,7 +168,9 @@ func listTasks(cfg *Config) error {
 			desc = "-"
 		}
 
-		fmt.Printf("%s %s %s\n", padVisual(name, minNameWidth), padVisual(statusStr, statusWidth), desc)
+		disabledStr := fmt.Sprintf("%v", task.Disabled)
+
+		fmt.Printf("%s %s %s %s\n", padVisual(name, minNameWidth), padVisual(statusStr, statusWidth), disabledStr, desc)
 	}
 
 	fmt.Println()
@@ -166,7 +178,7 @@ func listTasks(cfg *Config) error {
 }
 
 func handleStart(cfg *Config, args []string) error {
-	matchedTasks := matchTaskNames(cfg, args)
+	matchedTasks := matchTaskNames(cfg, args, true)
 	if len(matchedTasks) == 0 {
 		if len(args) > 0 {
 			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
@@ -177,7 +189,7 @@ func handleStart(cfg *Config, args []string) error {
 }
 
 func handleStop(cfg *Config, args []string) error {
-	matchedTasks := matchTaskNames(cfg, args)
+	matchedTasks := matchTaskNames(cfg, args, true)
 	if len(matchedTasks) == 0 {
 		if len(args) > 0 {
 			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
@@ -188,7 +200,7 @@ func handleStop(cfg *Config, args []string) error {
 }
 
 func handleRestart(cfg *Config, args []string) error {
-	matchedTasks := matchTaskNames(cfg, args)
+	matchedTasks := matchTaskNames(cfg, args, true)
 	if len(matchedTasks) == 0 {
 		if len(args) > 0 {
 			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
@@ -199,7 +211,7 @@ func handleRestart(cfg *Config, args []string) error {
 }
 
 func handleStatus(cfg *Config, args []string) error {
-	matchedTasks := matchTaskNames(cfg, args)
+	matchedTasks := matchTaskNames(cfg, args, true)
 	if len(matchedTasks) == 0 {
 		if len(args) > 0 {
 			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
@@ -228,7 +240,7 @@ func handleLogs(cfg *Config, args []string) error {
 		return fmt.Errorf("请指定任务名称")
 	}
 
-	matchedTasks := matchTaskNames(cfg, taskNames)
+	matchedTasks := matchTaskNames(cfg, taskNames, true)
 	if len(matchedTasks) == 0 {
 		return fmt.Errorf("没有匹配的任务: %s", strings.Join(taskNames, ", "))
 	}
