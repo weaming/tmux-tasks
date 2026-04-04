@@ -23,6 +23,6 @@ func WriteLog(format string, a ...interface{}) {
 	loc := time.FixedZone("HKT", 8*3600)
 	now := time.Now().In(loc).Format(time.RFC3339)
 	msg := fmt.Sprintf(format, a...)
-	
+
 	fmt.Fprintf(f, "[%s] %s\n", now, msg)
 }

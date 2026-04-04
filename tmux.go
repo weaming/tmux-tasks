@@ -29,7 +29,8 @@ type TaskStatus struct {
 }
 
 type Runner struct {
-	SSH string
+	SSH         string
+	InheritPath bool
 }
 
 func NewRunner(ssh string) *Runner {
@@ -122,7 +123,7 @@ func (r *Runner) StartTask(task Task) error {
 		if taskEnvs == nil {
 			taskEnvs = make(map[string]string)
 		}
-		if !r.isRemote() {
+		if !r.isRemote() && r.InheritPath {
 			if _, ok := taskEnvs["PATH"]; !ok {
 				if hostPath := os.Getenv("PATH"); hostPath != "" {
 					taskEnvs["PATH"] = hostPath + ":$PATH"
@@ -173,7 +174,7 @@ func (r *Runner) StopTask(taskName string) error {
 }
 
 func (r *Runner) RestartTask(task Task) error {
-	r.StopTask(task.Name) // Ignore error if it doesn't exist
+	r.StopTask(task.Name)
 	return r.StartTask(task)
 }
 
@@ -267,5 +268,11 @@ func NewRunnerForTask(cfg *Config, task Task) *Runner {
 	if ssh == "local" || ssh == "" {
 		ssh = ""
 	}
-	return NewRunner(ssh)
+	inheritPath := cfg.InheritPath || isInDocker()
+	return &Runner{SSH: ssh, InheritPath: inheritPath}
+}
+
+func isInDocker() bool {
+	_, err := os.Stat("/.dockerenv")
+	return err == nil
 }

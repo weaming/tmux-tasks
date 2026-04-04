@@ -22,8 +22,9 @@ type Machine struct {
 }
 
 type Config struct {
-	Machine *Machine `yaml:"machine"`
-	Tasks   []Task   `yaml:"-"`
+	Machine     *Machine `yaml:"machine"`
+	InheritPath bool     `yaml:"inheritPath"`
+	Tasks       []Task   `yaml:"-"`
 	// map for quick lookup
 	taskMap map[string]Task
 }
@@ -68,6 +69,8 @@ func LoadConfig(path string) (*Config, error) {
 						yaml.Unmarshal(b, &machine)
 					}
 					cfg.Machine = &machine
+				case "inheritPath":
+					cfg.InheritPath = val.Value == "true"
 				case "tasks":
 					if val.Kind == yaml.MappingNode {
 						for k := 0; k < len(val.Content); k += 2 {
