@@ -80,7 +80,6 @@ func (r *Runner) HasSession() bool {
 
 func (r *Runner) EnsureSession() error {
 	if !r.HasSession() {
-		// 使用登录 shell (-l) 以加载用户环境配置(PATH 等)
 		_, err := r.runCmd("tmux", "new-session", "-d", "-s", SessionName)
 		if err != nil {
 			return err
@@ -100,19 +99,30 @@ func (r *Runner) StartTask(task Task) error {
 	sb.WriteString(fmt.Sprintf("if ! tmux has-session -t %s 2>/dev/null; then\n", SessionName))
 	sb.WriteString(fmt.Sprintf("  tmux new-session -d -s %s\n", SessionName))
 	sb.WriteString(fmt.Sprintf("fi\n"))
-	
+
 	sb.WriteString(fmt.Sprintf("if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, task.Name))
 	sb.WriteString(fmt.Sprintf("  echo 'window_exists'\n"))
 	sb.WriteString(fmt.Sprintf("  exit 1\n"))
 	sb.WriteString(fmt.Sprintf("fi\n"))
-	
+
 	sb.WriteString(fmt.Sprintf("tmux new-window -t %s -n %s\n", SessionName, task.Name))
-	
+
 	if task.Command != "" {
 		cmd := task.Command
-		if len(task.Env) > 0 {
+		taskEnvs := task.Env
+		if taskEnvs == nil {
+			taskEnvs = make(map[string]string)
+		}
+		if !r.isRemote() {
+			if _, ok := taskEnvs["PATH"]; !ok {
+				if hostPath := os.Getenv("PATH"); hostPath != "" {
+					taskEnvs["PATH"] = hostPath + ":$PATH"
+				}
+			}
+		}
+		if len(taskEnvs) > 0 {
 			var envs []string
-			for k, v := range task.Env {
+			for k, v := range taskEnvs {
 				envs = append(envs, k+"="+v)
 			}
 			cmd = "export " + strings.Join(envs, " ") + " && " + cmd
@@ -123,7 +133,7 @@ func (r *Runner) StartTask(task Task) error {
 		escapedCmd := strings.ReplaceAll(cmd, "'", "'\\''")
 		sb.WriteString(fmt.Sprintf("tmux send-keys -t %s:%s '%s' Enter\n", SessionName, task.Name, escapedCmd))
 	}
-	
+
 	output, err := r.runScript(sb.String())
 	if err != nil {
 		if strings.Contains(output, "window_exists") {
@@ -142,7 +152,7 @@ func (r *Runner) StopTask(taskName string) error {
 	sb.WriteString(fmt.Sprintf("  echo 'window_not_exist'\n"))
 	sb.WriteString(fmt.Sprintf("  exit 1\n"))
 	sb.WriteString(fmt.Sprintf("fi\n"))
-	
+
 	output, err := r.runScript(sb.String())
 	if err != nil {
 		if strings.Contains(output, "window_not_exist") {

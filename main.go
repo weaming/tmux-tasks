@@ -42,6 +42,8 @@ func run(args []string) error {
 		return handleStatus(cfg, args[2:])
 	case "logs":
 		return handleLogs(cfg, args[2:])
+	case "autostart":
+		return handleAutoStart(cfg)
 	default:
 		return usage()
 	}
@@ -57,7 +59,22 @@ func usage() error {
 	fmt.Println("  restart [names...]  重启任务（无参数则重启所有，支持通配符）")
 	fmt.Println("  status [names...]   查看任务状态（无参数则显示列表，支持通配符）")
 	fmt.Println("  logs [-f] [names..] 查看或跟踪任务日志（-f 实时跟随）")
+	fmt.Println("  autostart           启动所有标记 autoStart: true 的任务")
 	return nil
+}
+
+func handleAutoStart(cfg *Config) error {
+	var tasks []Task
+	for _, task := range cfg.Tasks {
+		if task.AutoStart && !task.Disabled {
+			tasks = append(tasks, task)
+		}
+	}
+	if len(tasks) == 0 {
+		fmt.Println("没有标记 autoStart: true 的任务")
+		return nil
+	}
+	return startTasks(cfg, tasks)
 }
 
 // 计算名称列的格式化宽度
