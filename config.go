@@ -100,5 +100,5 @@ func GetConfigPath() string {
 		return path
 	}
 	home := os.Getenv("HOME")
-	return home + "/src/tmux-tasks/tasks.yaml"
+	return home + "/.config/tmux-tasks.yaml"
 }

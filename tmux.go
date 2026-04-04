@@ -10,7 +10,16 @@ import (
 	"time"
 )
 
-const SessionName = "tmux-tasks"
+var SessionName = GetSessionName()
+
+func GetSessionName() string {
+	name := "tmux-tasks"
+	nameFromEnv := os.Getenv("TMUX_SESSION_NAME")
+	if nameFromEnv != "" {
+		name = nameFromEnv
+	}
+	return name
+}
 
 type TaskStatus struct {
 	Name     string

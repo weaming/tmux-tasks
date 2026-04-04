@@ -17,7 +17,7 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) < 2 {
+	if len(args) < 2 || args[1] == "-h" || args[1] == "--help" {
 		return usage()
 	}
 
@@ -51,6 +51,10 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Println("Usage: tmux-tasks <command> [task names...]")
+	fmt.Println()
+	fmt.Println("environments:")
+	fmt.Printf("  TMUX_SESSION_NAME=%s\n", SessionName)
+	fmt.Printf("  TMUX_TASKS=%s\n", GetConfigPath())
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  list                列出所有任务状态")
