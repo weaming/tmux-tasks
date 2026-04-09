@@ -146,7 +146,7 @@ func matchTaskNames(cfg *Config, patterns []string, excludeDisabled bool) []Task
 	return matched
 }
 
-// 单个任务名是否匹配模式（支持 * 通配符）
+// 单个任务名是否匹配模式（支持 * 通配符，默认 *pattern* 匹配任意位置）
 func matchTaskName(name, pattern string) bool {
 	if pattern == "*" {
 		return true
@@ -160,7 +160,7 @@ func matchTaskName(name, pattern string) bool {
 			return strings.HasPrefix(name, parts[0]) || strings.HasSuffix(name, parts[0])
 		}
 	}
-	return name == pattern
+	return strings.Contains(name, pattern)
 }
 
 func listTasks(cfg *Config) error {
