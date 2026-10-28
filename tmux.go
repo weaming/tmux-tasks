@@ -26,6 +26,20 @@ type TaskStatus struct {
 	Running  bool
 	WindowID int
 	PID      int
+	Command  string
+}
+
+var shellCommands = map[string]struct{}{
+	"bash": {}, "dash": {}, "fish": {}, "ksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
+}
+
+func isShellCommand(command string) bool {
+	command = strings.TrimPrefix(command, "-")
+	if index := strings.LastIndex(command, "/"); index >= 0 {
+		command = command[index+1:]
+	}
+	_, ok := shellCommands[command]
+	return ok
 }
 
 type Runner struct {
@@ -179,7 +193,7 @@ func (r *Runner) RestartTask(task Task) error {
 }
 
 func (r *Runner) GetAllTaskStatus() (map[string]*TaskStatus, error) {
-	script := fmt.Sprintf("tmux list-panes -a -F '#{session_name}:#{window_index}:#{window_name}:#{pane_pid}' 2>/dev/null | grep '^%s:' || true", SessionName)
+	script := fmt.Sprintf("tmux list-panes -a -t %s -F '#{window_index}\t#{window_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_dead}' 2>/dev/null || true", SessionName)
 	output, err := r.runScript(script)
 	if err != nil {
 		return nil, err
@@ -191,19 +205,17 @@ func (r *Runner) GetAllTaskStatus() (map[string]*TaskStatus, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, ":")
-		if len(parts) >= 4 {
-			// parts[0] = session_name
-			// parts[1] = window_index
-			// parts[2] = window_name
-			// parts[3] = pane_pid
-			name := parts[2]
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 5 {
+			name := parts[1]
+			command := parts[3]
 			status := &TaskStatus{
 				Name:    name,
-				Running: true,
+				Command: command,
+				Running: parts[4] != "1" && command != "" && !isShellCommand(command),
 			}
-			fmt.Sscanf(parts[1], "%d", &status.WindowID)
-			fmt.Sscanf(parts[3], "%d", &status.PID)
+			fmt.Sscanf(parts[0], "%d", &status.WindowID)
+			fmt.Sscanf(parts[2], "%d", &status.PID)
 			statuses[name] = status
 		}
 	}
