@@ -72,10 +72,12 @@ func usage() error {
 	fmt.Println("  autoStart    start on autostart command (bool)")
 	fmt.Println("  disabled     exclude from all/wildcard operations (bool)")
 	fmt.Println("  ssh          run on remote host via SSH (host or 'local')")
+	fmt.Println("  jump         jump hosts for SSH (hk or [hk, hk2]; [] disables)")
 	fmt.Println("  description  task description")
 	fmt.Println()
 	fmt.Println("Config top-level fields:")
 	fmt.Println("  machine.ssh  default SSH host for all tasks")
+	fmt.Println("  machine.jump default jump hosts (bastion) for all tasks")
 	fmt.Println("  inheritPath  inherit host PATH into task env (default: false,")
 	fmt.Println("               auto-enabled inside Docker containers)")
 	return nil
@@ -173,29 +175,28 @@ func listTasks(cfg *Config) error {
 	headerDisabled := padVisual("启用", disabledWidth)
 	fmt.Printf("\x1b[1m%s %s %s 描述\x1b[0m\n", headerName, headerStatus, headerDisabled)
 
-	// Group tasks by runner SSH destination
-	runnerTasks := make(map[string][]Task)
+	// 按 runner 目标（含中转链）分组，避免同一目标重复查询
+	runners := make(map[string]*Runner)
 	for _, task := range cfg.Tasks {
 		r := NewRunnerForTask(cfg, task)
-		runnerTasks[r.SSH] = append(runnerTasks[r.SSH], task)
+		runners[r.Dest()] = r
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	statuses := make(map[string]*TaskStatus)
 
-	for sshStr, tasks := range runnerTasks {
+	for _, runner := range runners {
 		wg.Add(1)
-		go func(sshDest string, groupTasks []Task) {
+		go func(r *Runner) {
 			defer wg.Done()
-			r := NewRunner(sshDest)
 			sts, _ := r.GetAllTaskStatus()
 			mu.Lock()
 			for k, v := range sts {
 				statuses[k] = v
 			}
 			mu.Unlock()
-		}(sshStr, tasks)
+		}(runner)
 	}
 	wg.Wait()
 
@@ -326,12 +327,6 @@ func startAllTasks(cfg *Config) error {
 	return startTasks(cfg, cfg.Tasks)
 }
 
-func startOneTask(cfg *Config, name string, minNameWidth int) error {
-	msg := startOneTaskMsg(cfg, name, minNameWidth)
-	fmt.Print(msg)
-	return nil
-}
-
 func startOneTaskMsg(cfg *Config, name string, minNameWidth int) string {
 	task, ok := cfg.GetTask(name)
 	if !ok {
@@ -406,10 +401,6 @@ func stopOneTask(cfg *Config, name string) error {
 	return nil
 }
 
-func stopTask(cfg *Config, name string) error {
-	return stopOneTask(cfg, name)
-}
-
 func restartTasks(cfg *Config, tasks []Task) error {
 	minNameWidth := calcNameWidth(cfg)
 	statusWidth := 10
@@ -452,21 +443,6 @@ func restartAllTasks(cfg *Config) error {
 	return restartTasks(cfg, cfg.Tasks)
 }
 
-func restartTask(cfg *Config, name string) error {
-	task, ok := cfg.GetTask(name)
-	if !ok {
-		return fmt.Errorf("任务 %s 不存在", name)
-	}
-
-	runner := NewRunnerForTask(cfg, task)
-	fmt.Printf("重启任务: %s\n", name)
-	if err := runner.RestartTask(task); err != nil {
-		return err
-	}
-	fmt.Printf("任务 %s 已重启\n", name)
-	return nil
-}
-
 func statusTasks(cfg *Config, tasks []Task) error {
 	for _, task := range tasks {
 		if err := statusOneTask(cfg, task.Name); err != nil {
@@ -475,10 +451,6 @@ func statusTasks(cfg *Config, tasks []Task) error {
 		fmt.Println()
 	}
 	return nil
-}
-
-func statusTask(cfg *Config, name string) error {
-	return statusOneTask(cfg, name)
 }
 
 func statusOneTask(cfg *Config, name string) error {
@@ -543,39 +515,6 @@ func logsTasksFollow(cfg *Config, tasks []Task) error {
 		return fmt.Errorf("-f 模式只能跟随单个任务，当前匹配到 %d 个任务", len(tasks))
 	}
 	return followTaskLogs(cfg, tasks[0].Name)
-}
-
-func logsTask(cfg *Config, name string, follow bool) error {
-	task, ok := cfg.GetTask(name)
-	if !ok {
-		return fmt.Errorf("任务 %s 不存在", name)
-	}
-
-	runner := NewRunnerForTask(cfg, task)
-	if follow {
-		return runner.FollowTaskLogs(name)
-	}
-
-	logs, err := runner.GetTaskLogs(name, 100)
-	if err != nil {
-		return err
-	}
-
-	lines := strings.Split(strings.ReplaceAll(logs, "\r\n", "\n"), "\n")
-	for len(lines) > 0 {
-		clean := strings.ReplaceAll(lines[len(lines)-1], "\x1b[0m", "")
-		clean = strings.ReplaceAll(clean, "\x1b[K", "")
-		clean = strings.ReplaceAll(clean, "\x1b[m", "")
-		clean = strings.TrimSpace(clean)
-		if clean == "" {
-			lines = lines[:len(lines)-1]
-		} else {
-			break
-		}
-	}
-
-	fmt.Println(strings.Join(lines, "\n"))
-	return nil
 }
 
 func getTaskLogs(cfg *Config, name string, lines int) (string, error) {

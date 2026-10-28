@@ -1,10 +1,34 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// JumpHosts 中转机（跳板机）链，支持 jump: hk 或 jump: [hk, hk2]
+// 空数组表示显式不走中转，未配置（nil）表示继承上级配置
+type JumpHosts []string
+
+func (j *JumpHosts) UnmarshalYAML(node *yaml.Node) error {
+	hosts := JumpHosts{}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if host := strings.TrimSpace(node.Value); host != "" && host != "local" {
+			hosts = append(hosts, host)
+		}
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if host := strings.TrimSpace(item.Value); host != "" && host != "local" {
+				hosts = append(hosts, host)
+			}
+		}
+	}
+	*j = hosts
+	return nil
+}
 
 type Task struct {
 	Name        string            `yaml:"name"`
@@ -14,11 +38,13 @@ type Task struct {
 	AutoStart   bool              `yaml:"autoStart"`
 	Description string            `yaml:"description"`
 	SSH         *string           `yaml:"ssh"`
+	Jump        JumpHosts         `yaml:"jump"`
 	Disabled    bool              `yaml:"disabled"`
 }
 
 type Machine struct {
-	SSH string `yaml:"ssh"`
+	SSH  string    `yaml:"ssh"`
+	Jump JumpHosts `yaml:"jump"`
 }
 
 type Config struct {
@@ -32,10 +58,6 @@ type Config struct {
 func (c *Config) GetTask(name string) (Task, bool) {
 	task, ok := c.taskMap[name]
 	return task, ok
-}
-
-func (c *Config) GetAllTasks() []Task {
-	return c.Tasks
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -65,8 +87,8 @@ func LoadConfig(path string) (*Config, error) {
 				switch key {
 				case "machine":
 					var machine Machine
-					if b, err := yaml.Marshal(val); err == nil {
-						yaml.Unmarshal(b, &machine)
+					if err := val.Decode(&machine); err != nil {
+						return nil, fmt.Errorf("解析 machine 失败: %w", err)
 					}
 					cfg.Machine = &machine
 				case "inheritPath":
@@ -76,8 +98,8 @@ func LoadConfig(path string) (*Config, error) {
 						for k := 0; k < len(val.Content); k += 2 {
 							taskName := val.Content[k].Value
 							var task Task
-							if b, err := yaml.Marshal(val.Content[k+1]); err == nil {
-								yaml.Unmarshal(b, &task)
+							if err := val.Content[k+1].Decode(&task); err != nil {
+								return nil, fmt.Errorf("解析任务 %s 失败: %w", taskName, err)
 							}
 							if task.Name == "" {
 								task.Name = taskName

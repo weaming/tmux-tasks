@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,15 +46,62 @@ func isShellCommand(command string) bool {
 
 type Runner struct {
 	SSH         string
+	Jump        JumpHosts
 	InheritPath bool
-}
-
-func NewRunner(ssh string) *Runner {
-	return &Runner{SSH: ssh}
 }
 
 func (r *Runner) isRemote() bool {
 	return r != nil && r.SSH != ""
+}
+
+// Dest 返回 runner 目标的唯一标识，用于按目标分组
+func (r *Runner) Dest() string {
+	if len(r.Jump) == 0 {
+		return r.SSH
+	}
+	return strings.Join(r.Jump, ",") + ">" + r.SSH
+}
+
+// controlDir 返回 SSH 连接复用 socket 目录，不可用时为空
+var controlDir = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".ssh", "cm-tmux-tasks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	return dir
+}()
+
+// controlPath 生成连接复用 socket 路径，按中转链隔离避免复用错目标
+func (r *Runner) controlPath() string {
+	if controlDir == "" {
+		return ""
+	}
+	if len(r.Jump) == 0 {
+		return filepath.Join(controlDir, "%C")
+	}
+	h := fnv.New32a()
+	h.Write([]byte(strings.Join(r.Jump, ",")))
+	return filepath.Join(controlDir, fmt.Sprintf("j%08x-%%C", h.Sum32()))
+}
+
+// sshArgs 构造 ssh 公共选项；interactive 时不加 BatchMode 以允许人工输入密码
+func (r *Runner) sshArgs(interactive bool) []string {
+	args := []string{"-o", "ConnectTimeout=10"}
+	if path := r.controlPath(); path != "" {
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+path, "-o", "ControlPersist=60s")
+	}
+	if !interactive {
+		args = append(args, "-o", "BatchMode=yes")
+	}
+	if len(r.Jump) > 0 {
+		// 经中转机时转发 agent，供后续跳数使用本地密钥
+		args = append(args, "-A", "-J", strings.Join(r.Jump, ","))
+	}
+	return args
 }
 
 func (r *Runner) runCmd(name string, args ...string) (string, error) {
@@ -62,7 +111,8 @@ func (r *Runner) runCmd(name string, args ...string) (string, error) {
 	var cmd *exec.Cmd
 	if r.isRemote() {
 		remoteCmd := name + " " + strings.Join(args, " ")
-		cmd = exec.CommandContext(ctx, "ssh", "-T", r.SSH, remoteCmd)
+		sshArgs := append(r.sshArgs(false), "-T", r.SSH, remoteCmd)
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
 	} else {
 		cmd = exec.CommandContext(ctx, name, args...)
 	}
@@ -82,7 +132,8 @@ func (r *Runner) runScript(script string) (string, error) {
 
 	var cmd *exec.Cmd
 	if r.isRemote() {
-		cmd = exec.CommandContext(ctx, "ssh", "-T", r.SSH, "sh", "-s")
+		sshArgs := append(r.sshArgs(false), "-T", r.SSH, "sh", "-s")
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-s")
 	}
@@ -95,21 +146,6 @@ func (r *Runner) runScript(script string) (string, error) {
 		return string(output), fmt.Errorf("%s", errStr)
 	}
 	return string(output), nil
-}
-
-func (r *Runner) HasSession() bool {
-	_, err := r.runCmd("tmux", "has-session", "-t", SessionName)
-	return err == nil
-}
-
-func (r *Runner) EnsureSession() error {
-	if !r.HasSession() {
-		_, err := r.runCmd("tmux", "new-session", "-d", "-s", SessionName)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (r *Runner) HasWindow(taskName string) bool {
@@ -244,7 +280,8 @@ func (r *Runner) GetTaskLogs(taskName string, lines int) (string, error) {
 func (r *Runner) FollowTaskLogs(taskName string) error {
 	var cmd *exec.Cmd
 	if r.isRemote() {
-		cmd = exec.Command("ssh", "-t", r.SSH, "tmux", "attach-session", "-t", SessionName+":"+taskName, "-r")
+		sshArgs := append(r.sshArgs(true), "-t", r.SSH, "tmux", "attach-session", "-t", SessionName+":"+taskName, "-r")
+		cmd = exec.Command("ssh", sshArgs...)
 	} else {
 		cmd = exec.Command("tmux", "attach-session", "-t", SessionName+":"+taskName, "-r")
 	}
@@ -271,17 +308,24 @@ func (r *Runner) FollowTaskLogs(taskName string) error {
 
 func NewRunnerForTask(cfg *Config, task Task) *Runner {
 	ssh := ""
+	var jump JumpHosts
 	if cfg.Machine != nil {
 		ssh = cfg.Machine.SSH
+		jump = cfg.Machine.Jump
 	}
 	if task.SSH != nil {
 		ssh = *task.SSH
 	}
+	// 任务显式配置 jump 时覆盖 machine 级（含 jump: [] 表示直连）
+	if task.Jump != nil {
+		jump = task.Jump
+	}
 	if ssh == "local" || ssh == "" {
 		ssh = ""
+		jump = nil
 	}
 	inheritPath := cfg.InheritPath || isInDocker()
-	return &Runner{SSH: ssh, InheritPath: inheritPath}
+	return &Runner{SSH: ssh, Jump: jump, InheritPath: inheritPath}
 }
 
 func isInDocker() bool {
