@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -62,38 +60,10 @@ func (r *Runner) Dest() string {
 	return strings.Join(r.Jump, ",") + ">" + r.SSH
 }
 
-// controlDir 返回 SSH 连接复用 socket 目录，不可用时为空
-var controlDir = func() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	dir := filepath.Join(home, ".ssh", "cm-tmux-tasks")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	return dir
-}()
-
-// controlPath 生成连接复用 socket 路径，按中转链隔离避免复用错目标
-func (r *Runner) controlPath() string {
-	if controlDir == "" {
-		return ""
-	}
-	if len(r.Jump) == 0 {
-		return filepath.Join(controlDir, "%C")
-	}
-	h := fnv.New32a()
-	h.Write([]byte(strings.Join(r.Jump, ",")))
-	return filepath.Join(controlDir, fmt.Sprintf("j%08x-%%C", h.Sum32()))
-}
-
 // sshArgs 构造 ssh 公共选项；interactive 时不加 BatchMode 以允许人工输入密码
+// 连接复用交给 ~/.ssh/config（ControlMaster/ControlPath），这样能复用用户已有 master
 func (r *Runner) sshArgs(interactive bool) []string {
 	args := []string{"-o", "ConnectTimeout=10"}
-	if path := r.controlPath(); path != "" {
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+path, "-o", "ControlPersist=60s")
-	}
 	if !interactive {
 		args = append(args, "-o", "BatchMode=yes")
 	}

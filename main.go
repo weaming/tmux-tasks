@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -181,33 +182,23 @@ func listTasks(cfg *Config) error {
 
 	// 按 runner 目标（含中转链）分组，避免同一目标重复查询
 	runners := make(map[string]*Runner)
+	taskDest := make(map[string]string, len(cfg.Tasks))
 	for _, task := range cfg.Tasks {
 		r := NewRunnerForTask(cfg, task)
 		runners[r.Dest()] = r
+		taskDest[task.Name] = r.Dest()
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	statuses := make(map[string]*TaskStatus)
-
-	for _, runner := range runners {
-		wg.Add(1)
-		go func(r *Runner) {
-			defer wg.Done()
-			sts, _ := r.GetAllTaskStatus()
-			mu.Lock()
-			for k, v := range sts {
-				statuses[k] = v
-			}
-			mu.Unlock()
-		}(runner)
-	}
-	wg.Wait()
+	statuses, destErrs := collectStatuses(runners)
 
 	for _, task := range cfg.Tasks {
 		name := task.Name
 		statusStr := colorPaddedStatus("STOPPED", "\x1b[31m", statusWidth)
-		if st, ok := statuses[name]; ok && st.Running {
+		switch {
+		// 查不到状态（ssh 不通等）不能当成已停止
+		case destErrs[taskDest[name]] != nil:
+			statusStr = colorPaddedStatus("UNKNOWN", "\x1b[33m", statusWidth)
+		case statuses[name] != nil && statuses[name].Running:
 			statusStr = colorPaddedStatus("RUNNING", "\x1b[32m", statusWidth)
 		}
 
@@ -225,7 +216,66 @@ func listTasks(cfg *Config) error {
 	}
 
 	fmt.Println()
+
+	// 查询失败的目标单独提示，避免失败被静默吞掉
+	var failedDests []string
+	for dest := range destErrs {
+		failedDests = append(failedDests, dest)
+	}
+	sort.Strings(failedDests)
+	for _, dest := range failedDests {
+		target := dest
+		if target == "" {
+			target = "local"
+		}
+		fmt.Fprintf(os.Stderr, "\x1b[33m警告\x1b[0m 查询 %s 失败: %s（详见 ~/.tmux-tasks.log）\n", target, summarizeErr(destErrs[dest]))
+	}
 	return nil
+}
+
+// collectStatuses 并发查询各目标的状态；失败的目标单独返回，供调用方区分"不存在"与"查不到"
+func collectStatuses(runners map[string]*Runner) (map[string]*TaskStatus, map[string]error) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	statuses := make(map[string]*TaskStatus)
+	destErrs := make(map[string]error)
+
+	for dest, runner := range runners {
+		wg.Add(1)
+		go func(dest string, r *Runner) {
+			defer wg.Done()
+			sts, err := r.GetAllTaskStatus()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				destErrs[dest] = err
+				return
+			}
+			for k, v := range sts {
+				statuses[k] = v
+			}
+		}(dest, runner)
+	}
+	wg.Wait()
+
+	return statuses, destErrs
+}
+
+// summarizeErr 把 ssh 的多行错误压成一行摘要
+func summarizeErr(err error) string {
+	for _, line := range strings.Split(err.Error(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Warning: Permanently added") {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) > 160 {
+			return string(runes[:160]) + "…"
+		}
+		return line
+	}
+	return "未知错误"
 }
 
 func handleStart(cfg *Config, args []string) error {

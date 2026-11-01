@@ -46,6 +46,8 @@ tmux-tasks logs <name>      # 查看日志
 
 `start`、`restart`、`autostart` 会先清理同一 tmux session 中不在当前配置里的窗口。多个 profile 共用 session 时，清理范围也会跨 profile；可用 `TMUX_SESSION_NAME` 为各 profile 分配独立 session。
 
+SSH 连接复用完全交给 `~/.ssh/config`（`ControlMaster` / `ControlPath`），因此能直接复用你交互 shell 里已有的 ControlMaster。
+
 ## 环境变量
 
 - `TMUX_TASKS` - 配置文件路径
@@ -82,6 +84,5 @@ tasks:
 
 同时自动启用：
 
-- 连接复用 `ControlMaster=auto ControlPersist=60s`，socket 在 `~/.ssh/cm-tmux-tasks/`，避免多跳后每条命令重复握手
 - `BatchMode=yes` 与 `ConnectTimeout=10`，非交互命令不会卡在密码/指纹交互上
 - 有中转时 `-A` 转发 ssh-agent，供后续跳数使用本地密钥

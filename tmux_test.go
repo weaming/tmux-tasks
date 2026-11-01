@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -117,8 +119,10 @@ func TestSSHArgsWithJump(t *testing.T) {
 	if !containsPair(args, "-o", "BatchMode=yes") {
 		t.Errorf("非交互模式应带 BatchMode: %v", args)
 	}
-	if containsPair(args, "-o", "ControlMaster=auto") != (controlDir != "") {
-		t.Errorf("连接复用选项与 controlDir 状态不一致: %v, controlDir=%q", args, controlDir)
+	if containsPair(args, "-o", "ControlMaster=auto") || slices.ContainsFunc(args, func(arg string) bool {
+		return strings.HasPrefix(arg, "ControlPath=")
+	}) {
+		t.Errorf("应跟随 ~/.ssh/config，不覆盖连接复用: %v", args)
 	}
 
 	interactive := runner.sshArgs(true)
@@ -143,11 +147,30 @@ func TestDestIsolatesJumpChain(t *testing.T) {
 	if viaHK.Dest() == viaJP.Dest() {
 		t.Errorf("不同中转链应区分: %q", viaHK.Dest())
 	}
-	if viaHK.controlPath() != viaHK.controlPath() {
-		t.Error("controlPath 应稳定")
+}
+
+func TestSummarizeErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "多行 ssh 错误取首个有效行",
+			err:  errors.New("Warning: Permanently added 'jp' to the list\n\nConnection timed out during banner exchange\nConnection to UNKNOWN port 65535 timed out: exit status 255"),
+			want: "Connection timed out during banner exchange",
+		},
+		{
+			name: "空错误",
+			err:  errors.New("  \n"),
+			want: "未知错误",
+		},
 	}
-	if viaHK.controlPath() == viaJP.controlPath() {
-		t.Errorf("不同中转链应使用不同复用 socket: %q", viaHK.controlPath())
+
+	for _, test := range tests {
+		if got := summarizeErr(test.err); got != test.want {
+			t.Errorf("%s: summarizeErr() = %q, want %q", test.name, got, test.want)
+		}
 	}
 }
 
