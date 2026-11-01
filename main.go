@@ -84,6 +84,10 @@ func usage() error {
 }
 
 func handleAutoStart(cfg *Config) error {
+	if err := stopMissingTasks(cfg); err != nil {
+		return err
+	}
+
 	var tasks []Task
 	for _, task := range cfg.Tasks {
 		if task.AutoStart && !task.Disabled {
@@ -226,10 +230,13 @@ func listTasks(cfg *Config) error {
 
 func handleStart(cfg *Config, args []string) error {
 	matchedTasks := matchTaskNames(cfg, args, true)
+	if len(matchedTasks) == 0 && len(args) > 0 {
+		return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+	}
+	if err := stopMissingTasks(cfg); err != nil {
+		return err
+	}
 	if len(matchedTasks) == 0 {
-		if len(args) > 0 {
-			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
-		}
 		return startAllTasks(cfg)
 	}
 	return startTasks(cfg, matchedTasks)
@@ -248,13 +255,55 @@ func handleStop(cfg *Config, args []string) error {
 
 func handleRestart(cfg *Config, args []string) error {
 	matchedTasks := matchTaskNames(cfg, args, true)
+	if len(matchedTasks) == 0 && len(args) > 0 {
+		return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
+	}
+	if err := stopMissingTasks(cfg); err != nil {
+		return err
+	}
 	if len(matchedTasks) == 0 {
-		if len(args) > 0 {
-			return fmt.Errorf("没有匹配的任务: %s", strings.Join(args, ", "))
-		}
 		return restartAllTasks(cfg)
 	}
 	return restartTasks(cfg, matchedTasks)
+}
+
+func stopMissingTasks(cfg *Config) error {
+	runners := make(map[string]*Runner)
+	taskNames := make(map[string]map[string]bool)
+	for _, task := range cfg.Tasks {
+		runner := NewRunnerForTask(cfg, task)
+		dest := runner.Dest()
+		runners[dest] = runner
+		if taskNames[dest] == nil {
+			taskNames[dest] = make(map[string]bool)
+		}
+		taskNames[dest][task.Name] = true
+	}
+	if len(runners) == 0 {
+		runner := NewRunnerForTask(cfg, Task{})
+		runners[runner.Dest()] = runner
+	}
+
+	for dest, runner := range runners {
+		target := dest
+		if target == "" {
+			target = "local"
+		}
+		windows, err := runner.ListWindows()
+		if err != nil {
+			return fmt.Errorf("查询 %s 的 tmux 窗口失败: %w", target, err)
+		}
+		for _, name := range windows {
+			if taskNames[dest][name] {
+				continue
+			}
+			if err := runner.StopTask(name); err != nil {
+				return fmt.Errorf("停止 %s 的遗留任务 %s 失败: %w", target, name, err)
+			}
+			fmt.Printf("已停止遗留任务: %s (%s)\n", name, target)
+		}
+	}
+	return nil
 }
 
 func handleStatus(cfg *Config, args []string) error {

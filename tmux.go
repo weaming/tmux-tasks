@@ -154,18 +154,32 @@ func (r *Runner) HasWindow(taskName string) bool {
 	return err == nil
 }
 
+func (r *Runner) ListWindows() ([]string, error) {
+	script := fmt.Sprintf("if tmux has-session -t %s 2>/dev/null; then tmux list-windows -t %s -F '#{window_name}'; fi", SessionName, SessionName)
+	output, err := r.runScript(script)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(output) == "" {
+		return nil, nil
+	}
+	return strings.Split(strings.TrimSpace(output), "\n"), nil
+}
+
 func (r *Runner) StartTask(task Task) error {
 	var sb strings.Builder
+	sb.WriteString("created=0\n")
 	sb.WriteString(fmt.Sprintf("if ! tmux has-session -t %s 2>/dev/null; then\n", SessionName))
-	sb.WriteString(fmt.Sprintf("  tmux new-session -d -s %s\n", SessionName))
+	sb.WriteString(fmt.Sprintf("  tmux new-session -d -s %s -n %s && created=1\n", SessionName, task.Name))
 	sb.WriteString(fmt.Sprintf("fi\n"))
 
-	sb.WriteString(fmt.Sprintf("if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, task.Name))
-	sb.WriteString(fmt.Sprintf("  echo 'window_exists'\n"))
-	sb.WriteString(fmt.Sprintf("  exit 1\n"))
+	sb.WriteString("if [ \"$created\" != 1 ]; then\n")
+	sb.WriteString(fmt.Sprintf("  if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, task.Name))
+	sb.WriteString("    echo 'window_exists'\n")
+	sb.WriteString("    exit 1\n")
+	sb.WriteString("  fi\n")
+	sb.WriteString(fmt.Sprintf("  tmux new-window -t %s -n %s || exit 1\n", SessionName, task.Name))
 	sb.WriteString(fmt.Sprintf("fi\n"))
-
-	sb.WriteString(fmt.Sprintf("tmux new-window -t %s -n %s\n", SessionName, task.Name))
 
 	if task.Command != "" {
 		cmd := task.Command

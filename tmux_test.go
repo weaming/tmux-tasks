@@ -2,9 +2,12 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestIsShellCommand(t *testing.T) {
@@ -155,4 +158,109 @@ func containsPair(args []string, key, value string) bool {
 		}
 	}
 	return false
+}
+
+func TestStopMissingTasksBeforeStartRestartAutoStart(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux 未安装")
+	}
+
+	for _, command := range []string{"start", "restart", "autostart"} {
+		t.Run(command, func(t *testing.T) {
+			tmuxDir, err := os.MkdirTemp("/tmp", "tt-")
+			if err != nil {
+				t.Fatalf("创建 tmux 临时目录: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(tmuxDir); err != nil {
+					t.Errorf("删除 tmux 临时目录: %v", err)
+				}
+			})
+			t.Setenv("TMUX_TMPDIR", tmuxDir)
+			t.Setenv("TMUX", "")
+			previousSession := SessionName
+			SessionName = "tmux-tasks-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+			t.Cleanup(func() {
+				if output, err := exec.Command("tmux", "kill-session", "-t", SessionName).CombinedOutput(); err != nil {
+					t.Errorf("结束测试 session: %v: %s", err, output)
+				}
+				SessionName = previousSession
+			})
+
+			cfg := writeConfig(t, `
+tasks:
+  keep:
+    command: sleep 60
+    autoStart: true
+`)
+			if output, err := exec.Command("tmux", "new-session", "-d", "-s", SessionName, "-n", "keep").CombinedOutput(); err != nil {
+				t.Fatalf("创建测试 session: %v: %s", err, output)
+			}
+			if output, err := exec.Command("tmux", "new-window", "-t", SessionName, "-n", "orphan").CombinedOutput(); err != nil {
+				t.Fatalf("创建遗留窗口: %v: %s", err, output)
+			}
+
+			switch command {
+			case "start":
+				err = handleStart(cfg, []string{"keep"})
+			case "restart":
+				err = handleRestart(cfg, []string{"keep"})
+			case "autostart":
+				err = handleAutoStart(cfg)
+			}
+			if err != nil {
+				t.Fatalf("%s 失败: %v", command, err)
+			}
+
+			windows, err := (&Runner{}).ListWindows()
+			if err != nil {
+				t.Fatalf("查询窗口: %v", err)
+			}
+			if !slices.Equal(windows, []string{"keep"}) {
+				t.Errorf("窗口 = %v，期望仅保留 keep", windows)
+			}
+		})
+	}
+}
+
+func TestAutoStartStopsWindowsWhenConfigHasNoTasks(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux 未安装")
+	}
+
+	tmuxDir, err := os.MkdirTemp("/tmp", "tt-")
+	if err != nil {
+		t.Fatalf("创建 tmux 临时目录: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(tmuxDir); err != nil {
+			t.Errorf("删除 tmux 临时目录: %v", err)
+		}
+	})
+	t.Setenv("TMUX_TMPDIR", tmuxDir)
+	t.Setenv("TMUX", "")
+	previousSession := SessionName
+	SessionName = "tmux-tasks-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Cleanup(func() {
+		if exec.Command("tmux", "has-session", "-t", SessionName).Run() == nil {
+			if output, err := exec.Command("tmux", "kill-session", "-t", SessionName).CombinedOutput(); err != nil {
+				t.Errorf("结束测试 session: %v: %s", err, output)
+			}
+		}
+		SessionName = previousSession
+	})
+
+	if output, err := exec.Command("tmux", "new-session", "-d", "-s", SessionName, "-n", "orphan").CombinedOutput(); err != nil {
+		t.Fatalf("创建遗留窗口: %v: %s", err, output)
+	}
+	if err := handleAutoStart(writeConfig(t, "tasks: {}\n")); err != nil {
+		t.Fatalf("autostart 失败: %v", err)
+	}
+	windows, err := (&Runner{}).ListWindows()
+	if err != nil {
+		t.Fatalf("查询窗口: %v", err)
+	}
+	if len(windows) != 0 {
+		t.Errorf("仍有遗留窗口: %v", windows)
+	}
 }

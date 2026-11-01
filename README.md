@@ -44,6 +44,8 @@ tmux-tasks restart          # 重启所有任务
 tmux-tasks logs <name>      # 查看日志
 ```
 
+`start`、`restart`、`autostart` 会先清理同一 tmux session 中不在当前配置里的窗口。多个 profile 共用 session 时，清理范围也会跨 profile；可用 `TMUX_SESSION_NAME` 为各 profile 分配独立 session。
+
 ## 环境变量
 
 - `TMUX_TASKS` - 配置文件路径
