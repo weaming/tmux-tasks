@@ -74,7 +74,7 @@ func usage() error {
 	fmt.Println("  disabled     exclude from all/wildcard operations (bool)")
 	fmt.Println("  ssh          run on remote host via SSH (host or 'local')")
 	fmt.Println("  jump         jump hosts for SSH (hk or [hk, hk2]; [] disables)")
-	fmt.Println("  description  task description")
+	fmt.Println("  description  task description (alias: desc)")
 	fmt.Println()
 	fmt.Println("Config top-level fields:")
 	fmt.Println("  machine.ssh  default SSH host for all tasks")

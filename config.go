@@ -42,6 +42,23 @@ type Task struct {
 	Disabled    bool              `yaml:"disabled"`
 }
 
+// UnmarshalYAML 接受 desc 作为 description 的简写
+func (t *Task) UnmarshalYAML(node *yaml.Node) error {
+	type plain Task
+	var aux struct {
+		Plain plain  `yaml:",inline"`
+		Desc  string `yaml:"desc"`
+	}
+	if err := node.Decode(&aux); err != nil {
+		return err
+	}
+	*t = Task(aux.Plain)
+	if t.Description == "" {
+		t.Description = aux.Desc
+	}
+	return nil
+}
+
 type Machine struct {
 	SSH  string    `yaml:"ssh"`
 	Jump JumpHosts `yaml:"jump"`

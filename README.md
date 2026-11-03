@@ -63,7 +63,7 @@ SSH 连接复用完全交给 `~/.ssh/config`（`ControlMaster` / `ControlPath`�
 | jump        | 中转机，`hk` 或 `[hk, hk2]`，生成 `ssh -J`；`[]` 表示直连 |
 | autoStart   | `autostart` 命令是否启动该任务                           |
 | disabled    | 排除在全部/通配符操作之外                                |
-| description | 描述                                                     |
+| description | 描述（可简写为 `desc`）                                  |
 
 ## SSH 中转
 

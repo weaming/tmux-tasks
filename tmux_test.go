@@ -106,6 +106,41 @@ tasks:
 	}
 }
 
+func TestDescAlias(t *testing.T) {
+	cfg := writeConfig(t, `
+tasks:
+  short:
+    command: echo short
+    desc: 简写描述
+  long:
+    command: echo long
+    description: 完整描述
+  both:
+    command: echo both
+    description: 完整优先
+    desc: 不应生效
+`)
+
+	tests := []struct {
+		task string
+		want string
+	}{
+		{task: "short", want: "简写描述"},
+		{task: "long", want: "完整描述"},
+		{task: "both", want: "完整优先"},
+	}
+
+	for _, test := range tests {
+		task, ok := cfg.GetTask(test.task)
+		if !ok {
+			t.Fatalf("task %s not found", test.task)
+		}
+		if task.Description != test.want {
+			t.Errorf("task %s description = %q, want %q", test.task, task.Description, test.want)
+		}
+	}
+}
+
 func TestSSHArgsWithJump(t *testing.T) {
 	runner := &Runner{SSH: "prod", Jump: JumpHosts{"hk", "hk2"}}
 
