@@ -44,6 +44,34 @@ func writeConfig(t *testing.T, content string) *Config {
 	return cfg
 }
 
+// 准备隔离的 tmux 测试环境：临时 TMUX_TMPDIR + 独立 session 名，cleanup 时清理
+func setupTestTmuxSession(t *testing.T) {
+	t.Helper()
+
+	tmuxDir, err := os.MkdirTemp("/tmp", "tt-")
+	if err != nil {
+		t.Fatalf("创建 tmux 临时目录: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(tmuxDir); err != nil {
+			t.Errorf("删除 tmux 临时目录: %v", err)
+		}
+	})
+	t.Setenv("TMUX_TMPDIR", tmuxDir)
+	t.Setenv("TMUX", "")
+
+	previousSession := SessionName
+	SessionName = "tmux-tasks-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Cleanup(func() {
+		if exec.Command("tmux", "has-session", "-t", SessionName).Run() == nil {
+			if output, err := exec.Command("tmux", "kill-session", "-t", SessionName).CombinedOutput(); err != nil {
+				t.Errorf("结束测试 session: %v: %s", err, output)
+			}
+		}
+		SessionName = previousSession
+	})
+}
+
 func TestJumpInheritAndOverride(t *testing.T) {
 	cfg := writeConfig(t, `
 machine:
@@ -225,25 +253,7 @@ func TestStopMissingTasksBeforeStartRestartAutoStart(t *testing.T) {
 
 	for _, command := range []string{"start", "restart", "autostart"} {
 		t.Run(command, func(t *testing.T) {
-			tmuxDir, err := os.MkdirTemp("/tmp", "tt-")
-			if err != nil {
-				t.Fatalf("创建 tmux 临时目录: %v", err)
-			}
-			t.Cleanup(func() {
-				if err := os.RemoveAll(tmuxDir); err != nil {
-					t.Errorf("删除 tmux 临时目录: %v", err)
-				}
-			})
-			t.Setenv("TMUX_TMPDIR", tmuxDir)
-			t.Setenv("TMUX", "")
-			previousSession := SessionName
-			SessionName = "tmux-tasks-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-			t.Cleanup(func() {
-				if output, err := exec.Command("tmux", "kill-session", "-t", SessionName).CombinedOutput(); err != nil {
-					t.Errorf("结束测试 session: %v: %s", err, output)
-				}
-				SessionName = previousSession
-			})
+			setupTestTmuxSession(t)
 
 			cfg := writeConfig(t, `
 tasks:
@@ -258,6 +268,7 @@ tasks:
 				t.Fatalf("创建遗留窗口: %v: %s", err, output)
 			}
 
+			var err error
 			switch command {
 			case "start":
 				err = handleStart(cfg, []string{"keep"})
@@ -286,27 +297,7 @@ func TestAutoStartStopsWindowsWhenConfigHasNoTasks(t *testing.T) {
 		t.Skip("tmux 未安装")
 	}
 
-	tmuxDir, err := os.MkdirTemp("/tmp", "tt-")
-	if err != nil {
-		t.Fatalf("创建 tmux 临时目录: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(tmuxDir); err != nil {
-			t.Errorf("删除 tmux 临时目录: %v", err)
-		}
-	})
-	t.Setenv("TMUX_TMPDIR", tmuxDir)
-	t.Setenv("TMUX", "")
-	previousSession := SessionName
-	SessionName = "tmux-tasks-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	t.Cleanup(func() {
-		if exec.Command("tmux", "has-session", "-t", SessionName).Run() == nil {
-			if output, err := exec.Command("tmux", "kill-session", "-t", SessionName).CombinedOutput(); err != nil {
-				t.Errorf("结束测试 session: %v: %s", err, output)
-			}
-		}
-		SessionName = previousSession
-	})
+	setupTestTmuxSession(t)
 
 	if output, err := exec.Command("tmux", "new-session", "-d", "-s", SessionName, "-n", "orphan").CombinedOutput(); err != nil {
 		t.Fatalf("创建遗留窗口: %v: %s", err, output)
@@ -320,5 +311,81 @@ func TestAutoStartStopsWindowsWhenConfigHasNoTasks(t *testing.T) {
 	}
 	if len(windows) != 0 {
 		t.Errorf("仍有遗留窗口: %v", windows)
+	}
+}
+
+// 按父进程查找指定命令名的子进程 pid
+func findChildPid(parentPid int, comm string) int {
+	output, err := exec.Command("ps", "-eo", "pid=,ppid=,comm=").Output()
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil || ppid != parentPid {
+			continue
+		}
+		if filepath.Base(fields[2]) != comm {
+			continue
+		}
+		if pid, err := strconv.Atoi(fields[0]); err == nil {
+			return pid
+		}
+	}
+	return 0
+}
+
+func isProcessAlive(pid int) bool {
+	output, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	stat := strings.TrimSpace(string(output))
+	return stat != "" && !strings.HasPrefix(stat, "Z")
+}
+
+// 停任务时 kill-window 只发 SIGHUP，忽略 SIGHUP 的程序必须被补刀，否则会漏成孤儿占端口
+func TestStopTaskKillsChildIgnoringHup(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux 未安装")
+	}
+	setupTestTmuxSession(t)
+
+	runner := &Runner{}
+	// 子进程继承被忽略的 SIGHUP，模拟把 SIGHUP 当"重载配置"的守护进程
+	task := Task{Name: "stubborn", Command: `sh -c 'trap "" HUP; exec sleep 60'`}
+	if err := runner.StartTask(task); err != nil {
+		t.Fatalf("启动任务: %v", err)
+	}
+
+	var sleepPid int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		output, err := exec.Command("tmux", "list-panes", "-t", SessionName+":stubborn", "-F", "#{pane_pid}").Output()
+		if err == nil {
+			if panePid, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil {
+				if pid := findChildPid(panePid, "sleep"); pid > 0 {
+					sleepPid = pid
+					break
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if sleepPid == 0 {
+		t.Fatal("任务进程未启动")
+	}
+
+	if err := runner.StopTask("stubborn"); err != nil {
+		t.Fatalf("停止任务: %v", err)
+	}
+
+	if isProcessAlive(sleepPid) {
+		_ = exec.Command("kill", "-9", strconv.Itoa(sleepPid)).Run()
+		t.Errorf("停止任务后进程 %d 仍存活", sleepPid)
 	}
 }

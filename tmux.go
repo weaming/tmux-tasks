@@ -125,7 +125,9 @@ func (r *Runner) HasWindow(taskName string) bool {
 }
 
 func (r *Runner) ListWindows() ([]string, error) {
-	script := fmt.Sprintf("if tmux has-session -t %s 2>/dev/null; then tmux list-windows -t %s -F '#{window_name}'; fi", SessionName, SessionName)
+	script := fmt.Sprintf(`if tmux has-session -t %[1]s 2>/dev/null; then
+  tmux list-windows -t %[1]s -F '#{window_name}'
+fi`, SessionName)
 	output, err := r.runScript(script)
 	if err != nil {
 		return nil, err
@@ -136,49 +138,67 @@ func (r *Runner) ListWindows() ([]string, error) {
 	return strings.Split(strings.TrimSpace(output), "\n"), nil
 }
 
-func (r *Runner) StartTask(task Task) error {
-	var sb strings.Builder
-	sb.WriteString("created=0\n")
-	sb.WriteString(fmt.Sprintf("if ! tmux has-session -t %s 2>/dev/null; then\n", SessionName))
-	sb.WriteString(fmt.Sprintf("  tmux new-session -d -s %s -n %s && created=1\n", SessionName, task.Name))
-	sb.WriteString(fmt.Sprintf("fi\n"))
+// windowRef 返回 tmux 的 session:window 目标
+func windowRef(taskName string) string {
+	return SessionName + ":" + taskName
+}
 
-	sb.WriteString("if [ \"$created\" != 1 ]; then\n")
-	sb.WriteString(fmt.Sprintf("  if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, task.Name))
-	sb.WriteString("    echo 'window_exists'\n")
-	sb.WriteString("    exit 1\n")
-	sb.WriteString("  fi\n")
-	sb.WriteString(fmt.Sprintf("  tmux new-window -t %s -n %s || exit 1\n", SessionName, task.Name))
-	sb.WriteString(fmt.Sprintf("fi\n"))
+// shellQuote 把命令包成单引号字面量，供送进 pane 的行使用
+func shellQuote(cmd string) string {
+	return "'" + strings.ReplaceAll(cmd, "'", `'\''`) + "'"
+}
 
-	if task.Command != "" {
-		cmd := task.Command
-		taskEnvs := task.Env
-		if taskEnvs == nil {
-			taskEnvs = make(map[string]string)
-		}
-		if !r.isRemote() && r.InheritPath {
-			if _, ok := taskEnvs["PATH"]; !ok {
-				if hostPath := os.Getenv("PATH"); hostPath != "" {
-					taskEnvs["PATH"] = hostPath + ":$PATH"
-				}
-			}
-		}
-		if len(taskEnvs) > 0 {
-			var envs []string
-			for k, v := range taskEnvs {
-				envs = append(envs, k+"="+v)
-			}
-			cmd = "export " + strings.Join(envs, " ") + " && " + cmd
-		}
-		if task.Cwd != "" {
-			cmd = "cd " + task.Cwd + " && " + cmd
-		}
-		escapedCmd := strings.ReplaceAll(cmd, "'", "'\\''")
-		sb.WriteString(fmt.Sprintf("tmux send-keys -t %s:%s '%s' Enter\n", SessionName, task.Name, escapedCmd))
+// taskCommand 组装送进 pane 的完整命令行：env、cwd、可选继承宿主 PATH
+func (r *Runner) taskCommand(task Task) string {
+	if task.Command == "" {
+		return ""
 	}
 
-	output, err := r.runScript(sb.String())
+	cmd := task.Command
+	envs := task.Env
+	if envs == nil {
+		envs = make(map[string]string)
+	}
+	if !r.isRemote() && r.InheritPath {
+		if _, ok := envs["PATH"]; !ok {
+			if hostPath := os.Getenv("PATH"); hostPath != "" {
+				envs["PATH"] = hostPath + ":$PATH"
+			}
+		}
+	}
+	if len(envs) > 0 {
+		pairs := make([]string, 0, len(envs))
+		for k, v := range envs {
+			pairs = append(pairs, k+"="+v)
+		}
+		cmd = "export " + strings.Join(pairs, " ") + " && " + cmd
+	}
+	if task.Cwd != "" {
+		cmd = "cd " + task.Cwd + " && " + cmd
+	}
+	return cmd
+}
+
+func (r *Runner) StartTask(task Task) error {
+	sendKeys := ""
+	if cmd := r.taskCommand(task); cmd != "" {
+		sendKeys = fmt.Sprintf("tmux send-keys -t %s %s Enter\n", windowRef(task.Name), shellQuote(cmd))
+	}
+
+	script := fmt.Sprintf(`created=0
+if ! tmux has-session -t %[1]s 2>/dev/null; then
+  tmux new-session -d -s %[1]s -n %[2]s && created=1
+fi
+if [ "$created" != 1 ]; then
+  if tmux list-windows -t %[1]s -F '#{window_name}' 2>/dev/null | grep -q '^%[2]s$'; then
+    echo 'window_exists'
+    exit 1
+  fi
+  tmux new-window -t %[1]s -n %[2]s || exit 1
+fi
+%[3]s`, SessionName, task.Name, sendKeys)
+
+	output, err := r.runScript(script)
 	if err != nil {
 		if strings.Contains(output, "window_exists") {
 			return fmt.Errorf("window %s already exists", task.Name)
@@ -188,16 +208,53 @@ func (r *Runner) StartTask(task Task) error {
 	return nil
 }
 
+// StopTask 结束窗口，并补发 SIGTERM/SIGKILL 清掉窗口内的残留进程
+// kill-window 只会让 pane 内的进程收到 SIGHUP，把 SIGHUP 当"重载配置"的程序会变成孤儿继续占用端口
 func (r *Runner) StopTask(taskName string) error {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("if tmux list-windows -t %s -F '#{window_name}' 2>/dev/null | grep -q '^%s$'; then\n", SessionName, taskName))
-	sb.WriteString(fmt.Sprintf("  tmux kill-window -t %s:%s\n", SessionName, taskName))
-	sb.WriteString(fmt.Sprintf("else\n"))
-	sb.WriteString(fmt.Sprintf("  echo 'window_not_exist'\n"))
-	sb.WriteString(fmt.Sprintf("  exit 1\n"))
-	sb.WriteString(fmt.Sprintf("fi\n"))
+	script := fmt.Sprintf(`if ! tmux list-windows -t %[1]s -F '#{window_name}' 2>/dev/null | grep -q '^%[2]s$'; then
+  echo 'window_not_exist'
+  exit 1
+fi
 
-	output, err := r.runScript(sb.String())
+# 先按进程树记下窗口内的所有进程，kill-window 后它们会脱离父进程，届时无法再查找
+pane_pid=$(tmux list-panes -t %[3]s -F '#{pane_pid}' | head -n 1)
+pids=''
+if [ -n "$pane_pid" ]; then
+  pids=$(ps -eo pid=,ppid= | awk -v root="$pane_pid" '
+    { parent[$1] = $2 }
+    END {
+      keep[root] = 1
+      do {
+        added = 0
+        for (p in parent) {
+          if (!(p in keep) && (parent[p] in keep)) { keep[p] = 1; added = 1 }
+        }
+      } while (added)
+      for (p in keep) printf "%%s ", p
+    }')
+fi
+
+tmux kill-window -t %[3]s
+
+# 先 TERM 等其退出，超时再 KILL，避免新旧进程抢同一端口
+if [ -n "$pids" ]; then
+  kill -TERM $pids 2>/dev/null
+  i=0
+  while [ $i -lt 30 ]; do
+    alive=''
+    for p in $pids; do
+      st=$(ps -o stat= -p "$p" 2>/dev/null)
+      case "$st" in ''|Z*) ;; *) alive="$alive $p" ;; esac
+    done
+    [ -z "$alive" ] && break
+    sleep 0.1
+    i=$((i+1))
+  done
+  if [ -n "$alive" ]; then kill -KILL $alive 2>/dev/null; fi
+fi
+`, SessionName, taskName, windowRef(taskName))
+
+	output, err := r.runScript(script)
 	if err != nil {
 		if strings.Contains(output, "window_not_exist") {
 			return fmt.Errorf("window %s does not exist", taskName)
